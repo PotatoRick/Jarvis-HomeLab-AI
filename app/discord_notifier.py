@@ -12,6 +12,11 @@ from .models import RemediationAttempt, RiskLevel
 
 logger = structlog.get_logger()
 
+# LOW-007 FIX: Named constants for magic numbers
+DISCORD_WEBHOOK_TIMEOUT_SECONDS = 3  # HIGH-007 FIX: Reduced from 10 to fail fast
+MAX_EMBED_FIELD_LENGTH = 1000
+MAX_TRUNCATED_INDICATOR = "... (truncated)"
+
 
 class DiscordNotifier:
     """Sends notifications to Discord via webhook."""
@@ -21,10 +26,44 @@ class DiscordNotifier:
         self.webhook_url = settings.discord_webhook_url
         self.enabled = settings.discord_enabled
         self.logger = logger.bind(component="discord_notifier")
+        # PERF-003 FIX: Reusable session for connection pooling
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create the HTTP session for connection pooling."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close(self):
+        """Close the HTTP session. Call on shutdown."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    def _truncate_with_indicator(self, text: str, max_length: int = MAX_EMBED_FIELD_LENGTH) -> str:
+        """
+        Truncate text with indicator if too long.
+
+        LOW-003 FIX: Users now know when text was truncated.
+
+        Args:
+            text: Text to truncate
+            max_length: Maximum length
+
+        Returns:
+            Truncated text with indicator if needed
+        """
+        if not text or len(text) <= max_length:
+            return text
+        return text[:max_length - len(MAX_TRUNCATED_INDICATOR)] + MAX_TRUNCATED_INDICATOR
 
     async def send_webhook(self, payload: dict) -> bool:
         """
         Send a webhook payload to Discord.
+
+        HIGH-007 FIX: Reduced timeout to 3 seconds for fast failure.
+        PERF-003 FIX: Uses connection pool instead of new session each time.
+        SECURITY-004 FIX: Webhook URL truncated in error logs.
 
         Args:
             payload: Discord webhook JSON payload
@@ -37,24 +76,33 @@ class DiscordNotifier:
             return False
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.webhook_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 204:
-                        self.logger.info("discord_notification_sent")
-                        return True
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(
-                            "discord_webhook_failed",
-                            status=response.status,
-                            error=error_text
-                        )
-                        return False
+            session = await self._get_session()
+            async with session.post(
+                self.webhook_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=DISCORD_WEBHOOK_TIMEOUT_SECONDS)
+            ) as response:
+                if response.status == 204:
+                    self.logger.info("discord_notification_sent")
+                    return True
+                else:
+                    error_text = await response.text()
+                    self.logger.error(
+                        "discord_webhook_failed",
+                        status=response.status,
+                        error=error_text,
+                        # SECURITY-004 FIX: Don't log full webhook URL
+                        url_prefix=self.webhook_url[:50] + "..." if self.webhook_url else None
+                    )
+                    return False
 
+        except aiohttp.ClientError as e:
+            self.logger.warning(
+                "discord_webhook_connection_error",
+                error=str(e),
+                timeout=DISCORD_WEBHOOK_TIMEOUT_SECONDS
+            )
+            return False
         except Exception as e:
             self.logger.error(
                 "discord_webhook_exception",
@@ -256,11 +304,13 @@ class DiscordNotifier:
             }
         }
 
+        # MEDIUM-007 FIX: Only ping @here for critical severity alerts
         payload = {
             "username": "Jarvis",
-            "content": "@here",  # Ping everyone
             "embeds": [embed]
         }
+        if attempt.severity.lower() == "critical":
+            payload["content"] = "@here"  # Only ping for critical
 
         await self.send_webhook(payload)
 

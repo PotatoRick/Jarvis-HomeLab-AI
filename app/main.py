@@ -149,12 +149,23 @@ async def lifespan(app: FastAPI):
     learning_engine = LearningEngine(db)
     logger.info("learning_engine_initialized")
 
+    # CRITICAL-003 FIX: Validate SSH keys on startup
+    ssh_key_errors = ssh_executor.get_key_validation_errors()
+    if ssh_key_errors:
+        # Log warnings but don't fail startup - some hosts may be localhost
+        for error in ssh_key_errors:
+            logger.warning("ssh_key_validation_warning", error=error)
+    else:
+        logger.info("ssh_keys_validated", message="All SSH keys validated successfully")
+
     yield
 
     # Cleanup
     await host_monitor.stop()
     await alert_queue.stop()
     await external_service_monitor.stop()
+    # HIGH-011 FIX: Close SSH connections on shutdown to prevent resource leaks
+    await ssh_executor.close_all_connections()
     await db.disconnect()
     logger.info("application_shutdown")
 
@@ -185,6 +196,20 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials
+
+
+@app.get("/version")
+async def get_version():
+    """
+    Get Jarvis version information.
+
+    LOW-006: Dedicated version endpoint for quick version checks and monitoring.
+    """
+    return {
+        "name": settings.app_name,
+        "version": settings.app_version,
+        "python_version": "3.11"
+    }
 
 
 @app.get("/health")
@@ -262,6 +287,7 @@ async def get_patterns(
                 "failure_count": p['failure_count'],
                 "usage_count": p['usage_count'],
                 "risk_level": p['risk_level'],
+                "target_host": p.get('target_host'),  # v3.2: Host override
                 "solution": p['solution_commands'],
                 "root_cause": p.get('root_cause'),
                 "last_used": p['last_used_at'].isoformat() if p['last_used_at'] else None,
@@ -729,7 +755,7 @@ async def receive_alertmanager_webhook(
         logger.info("maintenance_mode_active", action="skipping_remediation")
         return {"status": "skipped", "reason": "maintenance_mode"}
 
-    # Handle resolved alerts - clear attempt counters
+    # Handle resolved alerts - clear attempt counters and escalation cooldowns
     if webhook.status.value == "resolved":
         for alert in webhook.alerts:
             alert_name = alert.labels.alertname
@@ -742,6 +768,9 @@ async def receive_alertmanager_webhook(
 
             cleared_count = await db.clear_attempts(alert_name, alert_instance)
 
+            # v3.1.0: Clear escalation cooldown so fresh incidents get escalated
+            cooldown_cleared = await db.clear_escalation_cooldown(alert_name, alert_instance)
+
             # Clear root cause from suppression
             if alert_suppressor:
                 alert_suppressor.clear_root_cause(alert_name)
@@ -750,7 +779,8 @@ async def receive_alertmanager_webhook(
                 "attempts_cleared_on_resolution",
                 alert_name=alert_name,
                 alert_instance=alert_instance,
-                cleared_count=cleared_count
+                cleared_count=cleared_count,
+                escalation_cooldown_cleared=cooldown_cleared
             )
 
         return {
@@ -799,6 +829,8 @@ def is_actionable_command(command: str) -> bool:
 
     Only actionable commands should count toward remediation attempts.
 
+    MEDIUM-001 FIX: Added comprehensive list of diagnostic patterns.
+
     Args:
         command: Command string to evaluate
 
@@ -807,33 +839,107 @@ def is_actionable_command(command: str) -> bool:
     """
     import re
 
-    # Diagnostic/read-only commands (do NOT count as attempts)
+    # MEDIUM-001 FIX: Comprehensive diagnostic/read-only commands (do NOT count as attempts)
     diagnostic_patterns = [
+        # Docker read-only commands
         r'^docker\s+ps',
         r'^docker\s+logs',
         r'^docker\s+inspect',
         r'^docker\s+stats',
+        r'^docker\s+images',
+        r'^docker\s+port',
+        r'^docker\s+top',
+        r'^docker\s+events',
+        r'^docker\s+info',
+        r'^docker\s+version',
         r'^docker\s+compose\s+ps',
         r'^docker\s+compose\s+logs',
+        r'^docker\s+compose\s+config',
+        r'^docker\s+compose\s+images',
+        r'^docker\s+compose\s+ls',
+        # Systemd read-only commands
         r'^systemctl\s+status',
+        r'^systemctl\s+is-active',
+        r'^systemctl\s+is-enabled',
+        r'^systemctl\s+is-failed',
+        r'^systemctl\s+show',
+        r'^systemctl\s+list-',
         r'^journalctl',
+        # Network diagnostics
         r'^curl\s+.*-[IfsSkLv]',  # GET requests with info/silent flags
+        r'^curl\s+--head',
+        r'^wget\s+--spider',
         r'^ping',
+        r'^traceroute',
+        r'^tracepath',
+        r'^dig\s',
+        r'^nslookup',
+        r'^host\s',
+        r'^netstat',
+        r'^ss\s+-',
+        r'^ip\s+(addr|link|route|neigh)\s+(show|list)?',
+        # System information
         r'^uptime',
         r'^free',
         r'^df',
+        r'^du\s',
+        r'^top\s+-b',
+        r'^vmstat',
+        r'^iostat',
+        r'^mpstat',
+        r'^sar\s',
+        r'^w$',
+        r'^who$',
+        r'^whoami',
+        r'^hostname',
+        r'^uname',
+        r'^lscpu',
+        r'^lsmem',
+        # File system read-only
         r'^ls\s',
+        r'^ls$',
         r'^cat\s',
+        r'^head\s',
+        r'^tail\s',
+        r'^less\s',
+        r'^more\s',
         r'^grep\s',
+        r'^find\s',
+        r'^stat\s',
+        r'^file\s',
+        r'^wc\s',
+        r'^diff\s',
+        r'^md5sum',
+        r'^sha\d+sum',
+        # Process/system lookup
         r'^which\s',
+        r'^whereis\s',
+        r'^type\s',
         r'^ps\s+aux',
-        r'^netstat',
-        r'^ss\s+-',
-        r'^ha\s+core\s+info',
-        r'^ha\s+core\s+check',
+        r'^ps\s+-ef',
+        r'^pgrep',
+        r'^pidof',
         r'^dmesg',
         r'^lsblk',
         r'^lsof',
+        r'^lspci',
+        r'^lsusb',
+        r'^fdisk\s+-l',
+        r'^blkid',
+        # Home Assistant read-only
+        r'^ha\s+core\s+info',
+        r'^ha\s+core\s+check',
+        r'^ha\s+core\s+stats',
+        r'^ha\s+info',
+        r'^ha\s+backups\s+list',
+        r'^ha\s+addons\s+info',
+        r'^ha\s+network\s+info',
+        # Database read-only
+        r'^psql\s+-c\s+["\']SELECT',  # SELECT queries only
+        r'^sqlite3\s+.*\s+["\']SELECT',
+        # Echo/print (diagnostic output)
+        r'^echo\s',
+        r'^printf\s',
     ]
 
     for pattern in diagnostic_patterns:
@@ -857,24 +963,42 @@ async def process_alert(alert):
     alert_name = alert.labels.alertname
     alert_fingerprint = alert.fingerprint
 
+    # HIGH-010 FIX: Validate alert fingerprint exists and is non-empty
+    # Empty fingerprints could bypass deduplication entirely
+    if not alert_fingerprint or not isinstance(alert_fingerprint, str) or len(alert_fingerprint.strip()) == 0:
+        logger.error(
+            "invalid_alert_fingerprint",
+            alert_name=alert_name,
+            fingerprint=alert_fingerprint,
+            reason="Fingerprint is empty, None, or invalid"
+        )
+        return {
+            "alert": alert_name,
+            "status": "error",
+            "reason": "Invalid or missing alert fingerprint"
+        }
+
+    # Normalize fingerprint (strip whitespace)
+    alert_fingerprint = alert_fingerprint.strip()
+
     # Build container-specific alert instance for ContainerDown alerts
     # This prevents different containers on same host from sharing attempt counters
-    # First check if instance label already contains host:container format
+    # HIGH-001 FIX: Always prefer explicit container/host labels over instance format
     if alert_name == "ContainerDown":
-        if ":" in alert.labels.instance:
-            # Instance already in host:container format (from Prometheus rule)
-            alert_instance = alert.labels.instance
-            logger.info(
-                "container_specific_instance_from_label",
-                alert_instance=alert_instance
-            )
-        elif hasattr(alert.labels, "container") and hasattr(alert.labels, "host"):
-            # Build from separate container and host labels
+        if hasattr(alert.labels, "container") and hasattr(alert.labels, "host"):
+            # Always prefer explicit labels - they're more accurate
             alert_instance = f"{alert.labels.host}:{alert.labels.container}"
             logger.info(
                 "container_specific_instance_built",
                 original_instance=alert.labels.instance,
                 container_instance=alert_instance
+            )
+        elif ":" in alert.labels.instance:
+            # Instance already in host:container format (from Prometheus rule)
+            alert_instance = alert.labels.instance
+            logger.info(
+                "container_specific_instance_from_label",
+                alert_instance=alert_instance
             )
         else:
             # Fallback to instance label
@@ -886,6 +1010,38 @@ async def process_alert(alert):
             )
     else:
         alert_instance = alert.labels.instance
+
+    # =========================================================================
+    # v3.1.0: Fingerprint-based deduplication
+    # CRITICAL-002 FIX: Use atomic check-and-set to prevent race conditions
+    # =========================================================================
+    # Check if we recently processed this exact alert (same fingerprint)
+    # This prevents spam when Alertmanager sends repeated webhooks for ongoing alerts
+    # The atomic operation ensures that two simultaneous alerts with the same fingerprint
+    # can't both pass the cooldown check
+    in_cooldown, last_processed = await db.check_and_set_fingerprint_atomic(
+        fingerprint=alert_fingerprint,
+        alert_name=alert_name,
+        alert_instance=alert_instance,
+        cooldown_seconds=settings.fingerprint_cooldown_seconds
+    )
+
+    if in_cooldown:
+        logger.info(
+            "alert_deduplicated",
+            alert_name=alert_name,
+            alert_instance=alert_instance,
+            fingerprint=alert_fingerprint[:16] + "...",
+            last_processed=last_processed.isoformat() if last_processed else None,
+            cooldown_seconds=settings.fingerprint_cooldown_seconds
+        )
+        return {
+            "alert": alert_name,
+            "status": "deduplicated",
+            "reason": f"Same fingerprint processed within {settings.fingerprint_cooldown_seconds}s"
+        }
+
+    # Fingerprint was atomically set above, no need for separate set call
 
     logger.info(
         "processing_alert",
@@ -1064,7 +1220,7 @@ You may use this pattern if it applies, or suggest a different approach if neede
             'reasoning': learned_pattern.get('root_cause', 'Historical pattern match'),
             'expected_outcome': 'Apply known solution',
             'commands': learned_pattern['solution_commands'],
-            'risk': RiskLevel[learned_pattern.get('risk_level', 'MEDIUM')]
+            'risk': RiskLevel[learned_pattern.get('risk_level', 'MEDIUM').upper()]
         })()
 
         logger.info(
@@ -1440,27 +1596,53 @@ async def escalate_alert(alert, attempt_count: int):
     """
     Escalate an alert to Discord for manual intervention.
 
+    v3.1.0: Checks escalation cooldown to prevent spam. If alert was already
+    escalated within the cooldown period, logs silently without Discord notification.
+
     Args:
         alert: Alert instance
         attempt_count: Number of attempts made
     """
+    alert_name = alert.labels.alertname
+    alert_instance = alert.labels.instance
+
+    # =========================================================================
+    # v3.1.0: Check escalation cooldown
+    # =========================================================================
+    in_cooldown, escalated_at = await db.check_escalation_cooldown(
+        alert_name=alert_name,
+        alert_instance=alert_instance,
+        cooldown_hours=settings.escalation_cooldown_hours
+    )
+
+    if in_cooldown:
+        # Already escalated recently - log silently, don't spam Discord
+        logger.info(
+            "escalation_skipped_cooldown",
+            alert_name=alert_name,
+            alert_instance=alert_instance,
+            escalated_at=escalated_at.isoformat() if escalated_at else None,
+            cooldown_hours=settings.escalation_cooldown_hours
+        )
+        return  # Silent return - no Discord notification
+
     logger.info(
         "escalating_alert",
-        alert_name=alert.labels.alertname,
+        alert_name=alert_name,
         attempts=attempt_count
     )
 
     # Get recent attempts
     previous_attempts = await db.get_recent_attempts(
-        alert_name=alert.labels.alertname,
-        alert_instance=alert.labels.instance,
+        alert_name=alert_name,
+        alert_instance=alert_instance,
         limit=3
     )
 
     # Create escalation attempt record
     attempt = RemediationAttempt(
-        alert_name=alert.labels.alertname,
-        alert_instance=alert.labels.instance,
+        alert_name=alert_name,
+        alert_instance=alert_instance,
         alert_fingerprint=alert.fingerprint,
         severity=alert.labels.severity,
         attempt_number=attempt_count,
@@ -1472,6 +1654,9 @@ async def escalate_alert(alert, attempt_count: int):
 
     # Log escalation to database
     await log_attempt_with_fallback(attempt)
+
+    # Set escalation cooldown to prevent spam
+    await db.set_escalation_cooldown(alert_name, alert_instance)
 
     # Notify Discord
     await discord_notifier.notify_escalation(attempt, previous_attempts)

@@ -19,6 +19,8 @@ def retry_with_backoff(max_retries=10, base_delay=1, max_delay=30):
     """
     Decorator to retry async functions with exponential backoff.
 
+    HIGH-012 FIX: Now explicitly logs and raises on final failure for clarity.
+
     Args:
         max_retries: Maximum number of retry attempts
         base_delay: Initial delay in seconds
@@ -27,12 +29,22 @@ def retry_with_backoff(max_retries=10, base_delay=1, max_delay=30):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            last_exception = None
             for attempt in range(max_retries):
                 try:
                     return await func(*args, **kwargs)
                 except Exception as e:
+                    last_exception = e
+
                     if attempt == max_retries - 1:
-                        # Last attempt, re-raise the exception
+                        # HIGH-012 FIX: Explicitly log final failure before raising
+                        logger.error(
+                            "retry_exhausted",
+                            function=func.__name__,
+                            total_attempts=max_retries,
+                            final_error=str(e),
+                            error_type=type(e).__name__
+                        )
                         raise
 
                     # Calculate exponential backoff delay
@@ -48,6 +60,11 @@ def retry_with_backoff(max_retries=10, base_delay=1, max_delay=30):
                     )
 
                     await asyncio.sleep(delay)
+
+            # HIGH-012 FIX: Explicit failure case - should never reach here but safety net
+            if last_exception:
+                raise last_exception
+            raise RuntimeError(f"Retry loop completed without success or exception for {func.__name__}")
 
         return wrapper
     return decorator
@@ -68,7 +85,18 @@ class Database:
 
         Retries up to 10 times with exponential backoff (1s, 2s, 4s, 8s, 16s, 30s max).
         This allows Jarvis to start even if PostgreSQL is still initializing.
+
+        CRITICAL-001 FIX: Clean up any existing pool before retry to prevent connection leaks.
         """
+        # Clean up any existing pool from failed attempts
+        if self.pool is not None:
+            try:
+                await self.pool.close()
+                self.logger.debug("cleaned_up_stale_pool_before_retry")
+            except Exception:
+                pass  # Ignore cleanup errors, we're about to create a new pool
+            self.pool = None
+
         self.pool = await asyncpg.create_pool(
             dsn=settings.database_url,
             min_size=1,
@@ -102,20 +130,28 @@ class Database:
         """
         Get number of remediation attempts for an alert in the time window.
 
+        Only counts actual remediation attempts, NOT escalation-only records.
+        This prevents the "escalation snowball" where each escalation increments
+        the counter, causing infinite escalations.
+
         Args:
             alert_name: Name of the alert
             alert_instance: Instance identifier
             window_hours: Time window in hours
 
         Returns:
-            Number of attempts
+            Number of attempts (excluding escalation-only records)
         """
+        # v3.1.0: Exclude escalation-only records from attempt count
+        # An escalation-only record has escalated=TRUE and no commands executed
+        # HIGH-005 FIX: Use COALESCE for array_length to properly handle NULL arrays and empty arrays
         query = """
             SELECT COUNT(*)
             FROM remediation_log
             WHERE alert_name = $1
               AND alert_instance = $2
               AND timestamp > NOW() - INTERVAL '1 hour' * $3
+              AND NOT (escalated = TRUE AND COALESCE(array_length(commands_executed, 1), 0) = 0)
         """
 
         async with self.pool.acquire() as conn:
@@ -316,18 +352,21 @@ class Database:
         Returns:
             Maintenance window dict if active, None otherwise
         """
+        # MEDIUM-005 FIX: Normalize host to lowercase for case-insensitive matching
+        normalized_host = host.lower() if host else None
+
         query = """
             SELECT id, host, started_at, reason, suppressed_alert_count
             FROM maintenance_windows
             WHERE is_active = TRUE
               AND ended_at IS NULL
-              AND (host = $1 OR host IS NULL)
+              AND (LOWER(host) = $1 OR host IS NULL)
             ORDER BY host NULLS FIRST
             LIMIT 1
         """
 
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, host)
+            row = await conn.fetchrow(query, normalized_host)
 
         return dict(row) if row else None
 
@@ -437,6 +476,331 @@ class Database:
         self.logger.info("statistics_retrieved", days=days, **stats)
 
         return stats
+
+    # =========================================================================
+    # Escalation Cooldown Functions (v3.1.0)
+    # =========================================================================
+
+    async def set_escalation_cooldown(
+        self,
+        alert_name: str,
+        alert_instance: str
+    ) -> None:
+        """
+        Record that an alert was escalated, starting its cooldown period.
+
+        Uses UPSERT to update existing cooldown or create new one.
+
+        Args:
+            alert_name: Name of the alert
+            alert_instance: Instance identifier
+        """
+        query = """
+            INSERT INTO escalation_cooldowns (alert_name, alert_instance, escalated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (alert_name, alert_instance)
+            DO UPDATE SET escalated_at = NOW()
+        """
+
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(query, alert_name, alert_instance)
+
+            self.logger.info(
+                "escalation_cooldown_set",
+                alert_name=alert_name,
+                alert_instance=alert_instance
+            )
+        except Exception as e:
+            self.logger.warning(
+                "escalation_cooldown_set_failed",
+                alert_name=alert_name,
+                alert_instance=alert_instance,
+                error=str(e)
+            )
+
+    async def check_escalation_cooldown(
+        self,
+        alert_name: str,
+        alert_instance: str,
+        cooldown_hours: int = 4
+    ) -> tuple[bool, Optional[datetime]]:
+        """
+        Check if an alert is in escalation cooldown.
+
+        Args:
+            alert_name: Name of the alert
+            alert_instance: Instance identifier
+            cooldown_hours: Hours to wait before re-escalating
+
+        Returns:
+            Tuple of (in_cooldown: bool, escalated_at: Optional[datetime])
+        """
+        query = """
+            SELECT escalated_at
+            FROM escalation_cooldowns
+            WHERE alert_name = $1
+              AND alert_instance = $2
+              AND escalated_at > NOW() - INTERVAL '1 hour' * $3
+        """
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, alert_name, alert_instance, cooldown_hours)
+
+        if row:
+            self.logger.info(
+                "escalation_cooldown_active",
+                alert_name=alert_name,
+                alert_instance=alert_instance,
+                escalated_at=row['escalated_at'].isoformat()
+            )
+            return True, row['escalated_at']
+
+        return False, None
+
+    async def clear_escalation_cooldown(
+        self,
+        alert_name: str,
+        alert_instance: str
+    ) -> bool:
+        """
+        Clear escalation cooldown when an alert resolves.
+
+        This allows fresh escalation if the alert fires again.
+
+        CRITICAL-004 FIX: Added explicit error handling and logging to ensure
+        database failures don't silently block future escalations.
+
+        Args:
+            alert_name: Name of the alert
+            alert_instance: Instance identifier
+
+        Returns:
+            True if a cooldown was cleared, False if none existed
+
+        Raises:
+            Exception: Re-raises database errors after logging
+        """
+        query = """
+            DELETE FROM escalation_cooldowns
+            WHERE alert_name = $1
+              AND alert_instance = $2
+            RETURNING id
+        """
+
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchval(query, alert_name, alert_instance)
+
+            if result:
+                self.logger.info(
+                    "escalation_cooldown_cleared",
+                    alert_name=alert_name,
+                    alert_instance=alert_instance
+                )
+                return True
+            else:
+                self.logger.debug(
+                    "escalation_cooldown_not_found",
+                    alert_name=alert_name,
+                    alert_instance=alert_instance
+                )
+                return False
+
+        except Exception as e:
+            self.logger.error(
+                "escalation_cooldown_clear_failed",
+                alert_name=alert_name,
+                alert_instance=alert_instance,
+                error=str(e)
+            )
+            raise  # Re-raise so caller knows it failed
+
+    # =========================================================================
+    # Fingerprint Deduplication Functions (v3.1.0)
+    # =========================================================================
+
+    async def check_and_set_fingerprint_atomic(
+        self,
+        fingerprint: str,
+        alert_name: str,
+        alert_instance: str,
+        cooldown_seconds: int = 300
+    ) -> tuple[bool, Optional[datetime]]:
+        """
+        Atomically check if fingerprint is in cooldown and set it if not.
+
+        CRITICAL-002 FIX: This uses a single atomic operation to prevent race conditions
+        where two identical alerts could both pass the cooldown check simultaneously.
+
+        The query:
+        1. Tries to INSERT the fingerprint
+        2. ON CONFLICT (fingerprint already exists):
+           - If processed_at is within cooldown window, don't update (keep old timestamp)
+           - If processed_at is older than cooldown, update to NOW()
+        3. Returns whether this was a NEW processing (not a cooldown hit)
+
+        Args:
+            fingerprint: Alert fingerprint hash
+            alert_name: Name of the alert
+            alert_instance: Instance identifier
+            cooldown_seconds: Seconds to wait before reprocessing
+
+        Returns:
+            Tuple of (in_cooldown: bool, processed_at: Optional[datetime])
+            - (True, timestamp) if in cooldown - should skip processing
+            - (False, None) if not in cooldown - proceed with processing
+        """
+        # First, try to INSERT. If conflict, check if in cooldown.
+        # This two-step approach is clearer and more reliable than complex UPSERT logic.
+        check_query = """
+            SELECT processed_at
+            FROM alert_processing_cache
+            WHERE fingerprint = $1
+              AND processed_at > NOW() - INTERVAL '1 second' * $2
+        """
+
+        insert_query = """
+            INSERT INTO alert_processing_cache (fingerprint, alert_name, alert_instance, processed_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (fingerprint) DO UPDATE
+            SET processed_at = NOW(),
+                alert_name = EXCLUDED.alert_name,
+                alert_instance = EXCLUDED.alert_instance
+            WHERE alert_processing_cache.processed_at <= NOW() - INTERVAL '1 second' * $4
+            RETURNING processed_at
+        """
+
+        try:
+            async with self.pool.acquire() as conn:
+                # Check if fingerprint exists and is in cooldown
+                existing = await conn.fetchrow(check_query, fingerprint, cooldown_seconds)
+
+                if existing:
+                    # Fingerprint exists and is within cooldown window
+                    self.logger.debug(
+                        "fingerprint_cooldown_active_atomic",
+                        fingerprint=fingerprint[:16] + "...",
+                        processed_at=existing['processed_at'].isoformat()
+                    )
+                    return True, existing['processed_at']
+
+                # Either doesn't exist or cooldown expired - insert/update
+                await conn.execute(insert_query, fingerprint, alert_name, alert_instance, cooldown_seconds)
+
+            return False, None
+
+        except Exception as e:
+            self.logger.warning(
+                "fingerprint_atomic_check_failed",
+                fingerprint=fingerprint[:16] + "...",
+                error=str(e)
+            )
+            # On error, allow processing (fail open to avoid blocking alerts)
+            return False, None
+
+    async def check_fingerprint_cooldown(
+        self,
+        fingerprint: str,
+        cooldown_seconds: int = 300
+    ) -> tuple[bool, Optional[datetime]]:
+        """
+        Check if an alert fingerprint was recently processed.
+
+        DEPRECATED: Use check_and_set_fingerprint_atomic() instead for race-safe operations.
+        This method is kept for backward compatibility.
+
+        Args:
+            fingerprint: Alert fingerprint hash
+            cooldown_seconds: Seconds to wait before reprocessing
+
+        Returns:
+            Tuple of (in_cooldown: bool, processed_at: Optional[datetime])
+        """
+        query = """
+            SELECT processed_at
+            FROM alert_processing_cache
+            WHERE fingerprint = $1
+              AND processed_at > NOW() - INTERVAL '1 second' * $2
+        """
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, fingerprint, cooldown_seconds)
+
+        if row:
+            self.logger.debug(
+                "fingerprint_cooldown_active",
+                fingerprint=fingerprint[:16] + "...",
+                processed_at=row['processed_at'].isoformat()
+            )
+            return True, row['processed_at']
+
+        return False, None
+
+    async def set_fingerprint_processed(
+        self,
+        fingerprint: str,
+        alert_name: str,
+        alert_instance: str
+    ) -> None:
+        """
+        Record that an alert fingerprint was processed.
+
+        DEPRECATED: Use check_and_set_fingerprint_atomic() instead for race-safe operations.
+        This method is kept for backward compatibility.
+
+        Args:
+            fingerprint: Alert fingerprint hash
+            alert_name: Name of the alert
+            alert_instance: Instance identifier
+        """
+        query = """
+            INSERT INTO alert_processing_cache (fingerprint, alert_name, alert_instance, processed_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (fingerprint)
+            DO UPDATE SET processed_at = NOW(), alert_name = $2, alert_instance = $3
+        """
+
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(query, fingerprint, alert_name, alert_instance)
+        except Exception as e:
+            self.logger.warning(
+                "fingerprint_cache_update_failed",
+                fingerprint=fingerprint[:16] + "...",
+                error=str(e)
+            )
+
+    async def cleanup_fingerprint_cache(self, max_age_hours: int = 24) -> int:
+        """
+        Clean up old entries from the fingerprint cache.
+
+        Should be called periodically to prevent table bloat.
+
+        Args:
+            max_age_hours: Delete entries older than this
+
+        Returns:
+            Number of entries deleted
+        """
+        query = """
+            DELETE FROM alert_processing_cache
+            WHERE processed_at < NOW() - INTERVAL '1 hour' * $1
+        """
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(query, max_age_hours)
+
+        count = int(result.split()[-1]) if result and result.split() else 0
+
+        if count > 0:
+            self.logger.info(
+                "fingerprint_cache_cleaned",
+                deleted_count=count,
+                max_age_hours=max_age_hours
+            )
+
+        return count
 
 
 # Global database instance

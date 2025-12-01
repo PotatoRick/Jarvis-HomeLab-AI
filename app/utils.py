@@ -1,212 +1,50 @@
 """
-Utility functions and helpers for Jarvis AI Remediation Service.
-
-v3.0: Added hint extraction, Skynet host detection, and investigation helpers.
+Utility functions and helpers.
 """
 
-import re
 import structlog
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional
 from .models import HostType, Alert
 
 
 logger = structlog.get_logger()
 
 
-# ============================================================================
-# Alert Hint Extraction (v3.0)
-# ============================================================================
-
-def extract_hints_from_alert(alert: Alert) -> Dict[str, Any]:
-    """
-    Extract actionable hints from alert annotations before calling Claude.
-
-    This parses the alert description/summary for:
-    - Host mentions (e.g., "Check cron job on Skynet")
-    - Suggested commands (e.g., "crontab -l")
-    - File paths mentioned
-    - Service names
-
-    Args:
-        alert: Alert instance
-
-    Returns:
-        Dictionary of extracted hints
-    """
-    hints = {
-        "mentioned_hosts": [],
-        "suggested_commands": [],
-        "mentioned_paths": [],
-        "mentioned_services": [],
-        "remediation_host_hint": None,
-    }
-
-    # Combine description and summary for analysis
-    text = ""
-    if alert.annotations.description:
-        text += alert.annotations.description + " "
-    if alert.annotations.summary:
-        text += alert.annotations.summary
-    text = text.lower()
-
-    # Detect host mentions
-    host_patterns = {
-        "skynet": ["skynet", "192.168.0.13"],
-        "nexus": ["nexus", "192.168.0.11"],
-        "homeassistant": ["homeassistant", "home assistant", "192.168.0.10", " ha "],
-        "outpost": ["outpost", "72.60.163.242", "vps"],
-    }
-
-    for host, patterns in host_patterns.items():
-        for pattern in patterns:
-            if pattern in text:
-                hints["mentioned_hosts"].append(host)
-                # If description explicitly says "on <host>" or "check <host>", that's the remediation host
-                if any(phrase in text for phrase in [f"on {pattern}", f"check {pattern}", f"{pattern}:", f"at {pattern}"]):
-                    hints["remediation_host_hint"] = host
-                break
-
-    # Detect suggested commands
-    command_patterns = [
-        (r'`([^`]+)`', "backtick"),  # Commands in backticks
-        (r'crontab\s*-l', "crontab"),
-        (r'docker\s+(?:logs|restart|ps)\s+\w+', "docker"),
-        (r'systemctl\s+(?:status|restart)\s+\S+', "systemctl"),
-        (r'journalctl\s+[^\s]+', "journalctl"),
-        (r'tail\s+-\d*f?\s+\S+', "tail"),
-        (r'cat\s+\S+', "cat"),
-    ]
-
-    for pattern, cmd_type in command_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            if isinstance(match, str) and len(match) > 2:
-                hints["suggested_commands"].append(match.strip())
-
-    # Detect file paths
-    path_pattern = r'(/[\w./-]+(?:\.(?:sh|log|conf|yml|yaml|json|env|prom))?)'
-    paths = re.findall(path_pattern, alert.annotations.description or "")
-    paths += re.findall(path_pattern, alert.annotations.summary or "")
-    hints["mentioned_paths"] = list(set(paths))
-
-    # Detect service names
-    service_patterns = [
-        r'(?:service|container|daemon)\s+["\']?(\w+)["\']?',
-        r'(?:docker|systemctl)\s+\w+\s+(\w+)',
-    ]
-
-    for pattern in service_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        hints["mentioned_services"].extend(matches)
-    hints["mentioned_services"] = list(set(hints["mentioned_services"]))
-
-    logger.info(
-        "hints_extracted_from_alert",
-        alert_name=alert.labels.alertname,
-        mentioned_hosts=hints["mentioned_hosts"],
-        remediation_host_hint=hints["remediation_host_hint"],
-        suggested_commands=hints["suggested_commands"][:3],  # Log first 3
-    )
-
-    return hints
-
-
-def get_confidence_level(confidence: float) -> str:
-    """
-    Convert numeric confidence to level string.
-
-    Args:
-        confidence: Float 0.0-1.0
-
-    Returns:
-        Confidence level string
-    """
-    if confidence < 0.30:
-        return "uncertain"
-    elif confidence < 0.50:
-        return "low"
-    elif confidence < 0.70:
-        return "medium"
-    elif confidence < 0.90:
-        return "high"
-    else:
-        return "very_high"
-
-
-def can_execute_at_confidence(action_type: str, confidence: float) -> Tuple[bool, str]:
-    """
-    Check if an action is allowed at the current confidence level.
-
-    Confidence-gated execution:
-    - < 30%: Only read-only diagnostic commands
-    - 30-50%: Safe investigative commands (logs, status checks)
-    - 50-70%: Safe restarts with verification
-    - 70-90%: Learned patterns
-    - > 90%: Any validated command
-
-    Args:
-        action_type: Type of action (read_only, investigate, restart, pattern, any)
-        confidence: Current confidence level 0.0-1.0
-
-    Returns:
-        Tuple of (allowed, reason)
-    """
-    thresholds = {
-        "read_only": 0.0,      # Always allowed
-        "investigate": 0.30,   # Need some confidence to run investigative commands
-        "restart": 0.50,       # Need medium confidence for restarts
-        "pattern": 0.70,       # Need high confidence for learned patterns
-        "any": 0.90,           # Need very high confidence for arbitrary commands
-    }
-
-    required = thresholds.get(action_type, 0.90)
-
-    if confidence >= required:
-        return True, f"Confidence {confidence:.0%} >= {required:.0%} threshold for {action_type}"
-    else:
-        return False, f"Confidence {confidence:.0%} < {required:.0%} required for {action_type}"
-
-
 def determine_target_host(alert: Alert, hints: Optional[Dict[str, Any]] = None) -> HostType:
     """
     Determine which host an alert is targeting based on instance label and hints.
 
-    v3.0: Now uses hints from alert description to override instance label when appropriate.
+    v3.0: Now accepts hints parameter which can override instance-based detection.
+    The remediation_host label takes precedence over instance detection.
 
     Args:
         alert: Alert instance
-        hints: Optional hints extracted from alert description
+        hints: Optional dict of hints extracted from alert (may contain target_host)
 
     Returns:
         HostType enum value
     """
-    # First, check if hints provide a remediation host override
-    # This handles cases where instance != where the fix should happen
-    if hints and hints.get("remediation_host_hint"):
-        hint_host = hints["remediation_host_hint"].lower()
+    # v3.0: Check for explicit host hint first (highest priority)
+    if hints and hints.get("target_host"):
+        hint_host = hints["target_host"].lower()
         if hint_host == "skynet":
-            logger.info(
-                "host_from_hint_override",
-                hint=hint_host,
-                original_instance=alert.labels.instance
-            )
             return HostType.SKYNET
         elif hint_host == "nexus":
             return HostType.NEXUS
-        elif hint_host in ["homeassistant", "ha"]:
-            return HostType.HOMEASSISTANT
-        elif hint_host == "outpost":
+        elif hint_host in ("outpost", "vps"):
             return HostType.OUTPOST
+        elif hint_host in ("homeassistant", "ha"):
+            return HostType.HOMEASSISTANT
 
     instance = alert.labels.instance.lower()
 
-    # Check for explicit host indicators in instance label
-    if "skynet" in instance or "192.168.0.13" in instance:
-        return HostType.SKYNET
-    elif "outpost" in instance or "72.60.163.242" in instance or "vps" in instance:
+    # Check for explicit host indicators
+    if "outpost" in instance or "72.60.163.242" in instance or "vps" in instance:
         return HostType.OUTPOST
     elif "homeassistant" in instance or "192.168.0.10" in instance or "ha" in instance:
         return HostType.HOMEASSISTANT
+    elif "skynet" in instance or "192.168.0.13" in instance:
+        return HostType.SKYNET
     elif "nexus" in instance or "192.168.0.11" in instance:
         return HostType.NEXUS
 
@@ -219,9 +57,6 @@ def determine_target_host(alert: Alert, hints: Optional[Dict[str, Any]] = None) 
         return HostType.NEXUS
     elif "zigbee" in alert_name or "automation" in alert_name:
         return HostType.HOMEASSISTANT
-    elif "backup" in alert_name and "health" in alert_name:
-        # Backup health checks run on Skynet
-        return HostType.SKYNET
 
     # Default to Nexus (most services run there)
     logger.warning(
@@ -231,62 +66,6 @@ def determine_target_host(alert: Alert, hints: Optional[Dict[str, Any]] = None) 
         default="nexus"
     )
     return HostType.NEXUS
-
-
-def is_cross_system_alert(alert: Alert) -> bool:
-    """
-    Check if an alert requires cross-system investigation.
-
-    Some issues (like VPN tunnels) involve multiple systems and
-    the root cause might be on a different host than where the alert fired.
-
-    Args:
-        alert: Alert instance
-
-    Returns:
-        True if alert needs cross-system investigation
-    """
-    alert_name = alert.labels.alertname.lower()
-
-    # VPN/WireGuard alerts need both endpoints checked
-    cross_system_patterns = [
-        "wireguard",
-        "vpn",
-        "wg-quick",
-        "site-to-site",
-    ]
-
-    return any(pattern in alert_name for pattern in cross_system_patterns)
-
-
-def get_related_hosts(alert: Alert) -> list:
-    """
-    Get list of hosts that should be investigated for this alert.
-
-    For cross-system alerts (like VPN), returns multiple hosts.
-    For normal alerts, returns just the primary target.
-
-    Args:
-        alert: Alert instance
-
-    Returns:
-        List of HostType values to investigate
-    """
-    primary_host = determine_target_host(alert)
-
-    if is_cross_system_alert(alert):
-        alert_name = alert.labels.alertname.lower()
-
-        # WireGuard VPN connects Nexus <-> Outpost
-        if "wireguard" in alert_name or "vpn" in alert_name:
-            logger.info(
-                "cross_system_alert_detected",
-                alert_name=alert.labels.alertname,
-                hosts=["outpost", "nexus"]
-            )
-            return [HostType.OUTPOST, HostType.NEXUS]
-
-    return [primary_host]
 
 
 def extract_service_name(alert: Alert) -> Optional[str]:
@@ -425,3 +204,167 @@ def truncate_logs(logs: str, max_length: int = 2000) -> str:
         truncated = truncated[newline_pos + 1:]
 
     return f"[... truncated to last {max_length} chars ...]\n{truncated}"
+
+
+def is_cross_system_alert(alert: Alert) -> bool:
+    """
+    Determine if an alert involves multiple systems (e.g., VPN, network connectivity).
+
+    Cross-system alerts may require checking/fixing multiple hosts.
+
+    Args:
+        alert: Alert instance
+
+    Returns:
+        True if alert spans multiple systems
+    """
+    alert_name = alert.labels.alertname.lower()
+    description = ""
+    if hasattr(alert.annotations, "description") and alert.annotations.description:
+        description = alert.annotations.description.lower()
+
+    # VPN/network alerts typically span systems
+    cross_system_keywords = [
+        "wireguard", "vpn", "tunnel", "site-to-site",
+        "connectivity", "unreachable", "network"
+    ]
+
+    for keyword in cross_system_keywords:
+        if keyword in alert_name or keyword in description:
+            return True
+
+    return False
+
+
+def get_related_hosts(alert: Alert) -> list:
+    """
+    Get list of hosts that may be related to this alert.
+
+    For cross-system alerts, returns all potentially affected hosts.
+
+    Args:
+        alert: Alert instance
+
+    Returns:
+        List of HostType values
+    """
+    if not is_cross_system_alert(alert):
+        return [determine_target_host(alert)]
+
+    # For cross-system alerts, check primary hosts
+    alert_name = alert.labels.alertname.lower()
+
+    if "wireguard" in alert_name or "vpn" in alert_name:
+        # VPN alerts: check both endpoints
+        return [HostType.NEXUS, HostType.OUTPOST]
+    elif "network" in alert_name or "connectivity" in alert_name:
+        # General network issues: check all main hosts
+        return [HostType.NEXUS, HostType.HOMEASSISTANT, HostType.OUTPOST]
+
+    # Default: just the target host
+    return [determine_target_host(alert)]
+
+
+def _sanitize_hint_value(value: Any) -> str:
+    """
+    Sanitize hint value, handling Unicode and encoding issues.
+
+    MEDIUM-010 FIX: Properly handles Unicode characters in hint values.
+
+    Args:
+        value: Raw value from alert label/annotation
+
+    Returns:
+        Sanitized string value
+    """
+    if value is None:
+        return ""
+
+    try:
+        # Convert to string if needed
+        if not isinstance(value, str):
+            value = str(value)
+
+        # Normalize Unicode characters
+        import unicodedata
+        normalized = unicodedata.normalize('NFKC', value)
+
+        # Remove control characters but keep valid Unicode
+        cleaned = ''.join(
+            char for char in normalized
+            if not unicodedata.category(char).startswith('C') or char in '\n\t'
+        )
+
+        return cleaned.strip()
+    except Exception as e:
+        logger.warning(
+            "hint_sanitization_failed",
+            value_type=type(value).__name__,
+            error=str(e)
+        )
+        # Fallback: try ASCII encoding
+        try:
+            return str(value).encode('ascii', 'replace').decode('ascii')
+        except Exception:
+            return ""
+
+
+def extract_hints_from_alert(alert: Alert) -> Dict[str, Any]:
+    """
+    Extract hints from alert labels/annotations that can help with remediation.
+
+    v3.0: Enhanced hint extraction for better AI analysis.
+    MEDIUM-010 FIX: Now sanitizes Unicode characters in hint values.
+
+    Args:
+        alert: Alert instance
+
+    Returns:
+        Dictionary of hints
+    """
+    hints = {}
+
+    # Check for remediation hints in labels
+    labels = alert.labels
+    if hasattr(labels, "remediation_hint"):
+        hints["remediation_hint"] = _sanitize_hint_value(labels.remediation_hint)
+    if hasattr(labels, "remediation_host"):
+        hints["target_host"] = _sanitize_hint_value(labels.remediation_host)
+    if hasattr(labels, "service"):
+        hints["service"] = _sanitize_hint_value(labels.service)
+    if hasattr(labels, "container"):
+        hints["container"] = _sanitize_hint_value(labels.container)
+    if hasattr(labels, "job"):
+        hints["job"] = _sanitize_hint_value(labels.job)
+
+    # Check for hints in annotations
+    annotations = alert.annotations
+    if hasattr(annotations, "runbook_url"):
+        hints["runbook_url"] = _sanitize_hint_value(annotations.runbook_url)
+    if hasattr(annotations, "remediation"):
+        hints["suggested_remediation"] = _sanitize_hint_value(annotations.remediation)
+
+    # MEDIUM-010 FIX: Remove empty string values
+    hints = {k: v for k, v in hints.items() if v}
+
+    return hints
+
+
+def get_confidence_level(confidence_score: float) -> str:
+    """
+    Convert numeric confidence score to human-readable level.
+
+    v3.0: Helper for pattern confidence reporting.
+
+    Args:
+        confidence_score: Float between 0 and 1
+
+    Returns:
+        String level: 'high', 'medium', or 'low'
+    """
+    if confidence_score >= 0.80:
+        return "high"
+    elif confidence_score >= 0.60:
+        return "medium"
+    else:
+        return "low"

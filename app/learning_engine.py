@@ -61,6 +61,7 @@ class LearningEngine:
         remediation. Uses intelligent fingerprinting to group similar issues.
 
         v3.0: Now stores investigation chains and tracks host mismatches.
+        CRITICAL-005 FIX: Added input validation and proper error handling.
 
         Args:
             attempt: Successful remediation attempt
@@ -85,6 +86,16 @@ class LearningEngine:
             alert_labels
         )
 
+        # CRITICAL-005 FIX: Truncate fingerprint if too long
+        max_fingerprint_len = 5000
+        if len(symptom_fingerprint) > max_fingerprint_len:
+            symptom_fingerprint = symptom_fingerprint[:max_fingerprint_len]
+            self.logger.warning(
+                "symptom_fingerprint_truncated",
+                original_length=len(symptom_fingerprint),
+                max_length=max_fingerprint_len
+            )
+
         # Determine alert category
         category = self._categorize_alert(attempt.alert_name)
 
@@ -99,6 +110,22 @@ class LearningEngine:
             "alert_instance": attempt.alert_instance,
         }
 
+        # CRITICAL-005 FIX: Validate metadata is JSON serializable
+        try:
+            import json
+            json.dumps(metadata)
+        except (TypeError, ValueError) as e:
+            self.logger.error(
+                "metadata_not_json_serializable",
+                error=str(e),
+                alert_name=attempt.alert_name
+            )
+            # Use minimal metadata instead of failing completely
+            metadata = {
+                "alert_instance": attempt.alert_instance,
+                "serialization_error": str(e)
+            }
+
         self.logger.info(
             "extracting_pattern",
             alert_name=attempt.alert_name,
@@ -108,47 +135,60 @@ class LearningEngine:
             instance_misleading=instance_was_misleading
         )
 
-        # Check if pattern exists
-        existing_pattern = await self._find_existing_pattern(
-            attempt.alert_name,
-            symptom_fingerprint
-        )
+        try:
+            # Check if pattern exists
+            existing_pattern = await self._find_existing_pattern(
+                attempt.alert_name,
+                symptom_fingerprint
+            )
 
-        if existing_pattern:
-            # Update existing pattern
-            pattern_id = await self._update_pattern(
-                existing_pattern['id'],
-                attempt.commands_executed,
-                success=True,
-                metadata=metadata
-            )
-            self.logger.info(
-                "pattern_updated",
-                pattern_id=pattern_id,
-                new_success_count=existing_pattern['success_count'] + 1
-            )
-        else:
-            # Create new pattern
-            pattern_id = await self._create_pattern(
+            if existing_pattern:
+                # Update existing pattern
+                pattern_id = await self._update_pattern(
+                    existing_pattern['id'],
+                    attempt.commands_executed,
+                    success=True,
+                    metadata=metadata
+                )
+                self.logger.info(
+                    "pattern_updated",
+                    pattern_id=pattern_id,
+                    new_success_count=existing_pattern['success_count'] + 1
+                )
+            else:
+                # Create new pattern
+                pattern_id = await self._create_pattern(
+                    alert_name=attempt.alert_name,
+                    category=category,
+                    symptom_fingerprint=symptom_fingerprint,
+                    root_cause=root_cause,
+                    solution_commands=attempt.commands_executed,
+                    risk_level=attempt.risk_level,
+                    metadata=metadata
+                )
+                self.logger.info(
+                    "pattern_created",
+                    pattern_id=pattern_id,
+                    alert_name=attempt.alert_name,
+                    has_investigation_chain=bool(investigation_chain)
+                )
+
+            # Invalidate cache
+            self._cache_timestamp = None
+
+            return pattern_id
+
+        except Exception as e:
+            # CRITICAL-005 FIX: Log error with full context but don't crash
+            self.logger.error(
+                "pattern_extraction_database_error",
                 alert_name=attempt.alert_name,
-                category=category,
-                symptom_fingerprint=symptom_fingerprint,
-                root_cause=root_cause,
-                solution_commands=attempt.commands_executed,
-                risk_level=attempt.risk_level,
-                metadata=metadata
+                symptom_fingerprint=symptom_fingerprint[:100],
+                error=str(e),
+                error_type=type(e).__name__
             )
-            self.logger.info(
-                "pattern_created",
-                pattern_id=pattern_id,
-                alert_name=attempt.alert_name,
-                has_investigation_chain=bool(investigation_chain)
-            )
-
-        # Invalidate cache
-        self._cache_timestamp = None
-
-        return pattern_id
+            # Return None to indicate failure, caller should handle
+            return None
 
     async def find_similar_patterns(
         self,
@@ -279,16 +319,21 @@ class LearningEngine:
         pattern_id: int,
         success: bool,
         execution_time: int
-    ):
+    ) -> Optional[float]:
         """
         Record the outcome of using a learned pattern.
 
         Updates pattern statistics using Bayesian confidence scoring.
 
+        HIGH-006 FIX: Now properly returns the new confidence value.
+
         Args:
             pattern_id: ID of the pattern used
             success: Whether remediation succeeded
             execution_time: Time taken in seconds
+
+        Returns:
+            New confidence score after update, or None on error
         """
         query = """
             UPDATE remediation_patterns
@@ -328,6 +373,9 @@ class LearningEngine:
         # Invalidate cache
         self._cache_timestamp = None
 
+        # HIGH-006 FIX: Return the new confidence value
+        return new_confidence
+
     def _build_symptom_fingerprint(
         self,
         alert_name: str,
@@ -338,6 +386,8 @@ class LearningEngine:
 
         This helps group similar alerts together even if they have
         different instances or minor label variations.
+
+        v3.2: Added 'system' label support for backup alerts (homeassistant, nexus, etc.)
         """
         # Key labels that indicate symptom type
         key_labels = [
@@ -348,7 +398,8 @@ class LearningEngine:
             'service',
             'host',
             'device',
-            'filesystem'
+            'filesystem',
+            'system',  # v3.2: For backup alerts (homeassistant, nexus, etc.)
         ]
 
         parts = [alert_name]
@@ -369,6 +420,7 @@ class LearningEngine:
                     else:
                         parts.append(f'{label}:generic')
                 else:
+                    # Include label as-is (e.g., system:homeassistant for backup alerts)
                     parts.append(f'{label}:{value}')
 
         return '|'.join(parts)
@@ -437,12 +489,21 @@ class LearningEngine:
         root_cause: Optional[str],
         solution_commands: List[str],
         risk_level: Optional[RiskLevel],
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        target_host: Optional[str] = None
     ) -> int:
         """Create a new remediation pattern.
 
         v3.0: Now stores metadata including investigation chain.
+        v3.2: Added target_host for explicit host override.
+        MEDIUM-008 FIX: Uses INSERT ON CONFLICT to handle race conditions
+        where two processes try to create the same pattern simultaneously.
         """
+        # Extract target_host from metadata if not explicitly provided
+        if target_host is None and metadata and 'actual_remediation_host' in metadata:
+            target_host = metadata['actual_remediation_host']
+
+        # MEDIUM-008 FIX: Use UPSERT to handle race conditions gracefully
         query = """
             INSERT INTO remediation_patterns (
                 alert_name,
@@ -450,9 +511,16 @@ class LearningEngine:
                 symptom_fingerprint,
                 root_cause,
                 solution_commands,
+                target_host,
                 risk_level,
                 metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (alert_name, symptom_fingerprint)
+            DO UPDATE SET
+                success_count = remediation_patterns.success_count + 1,
+                solution_commands = EXCLUDED.solution_commands,
+                metadata = COALESCE(remediation_patterns.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata::jsonb, '{}'::jsonb),
+                updated_at = NOW()
             RETURNING id
         """
 
@@ -464,6 +532,7 @@ class LearningEngine:
                 symptom_fingerprint,
                 root_cause,
                 solution_commands,
+                target_host,
                 risk_level.value if risk_level else 'MEDIUM',
                 json.dumps(metadata) if metadata else None
             )
@@ -482,6 +551,7 @@ class LearningEngine:
         v3.0: Now merges metadata including investigation chain.
         """
         # v3.0: Use JSONB merge if metadata provided
+        # HIGH-004 FIX: Use correct column names from schema (last_used_at, updated_at)
         if metadata:
             query = """
                 UPDATE remediation_patterns
@@ -495,8 +565,8 @@ class LearningEngine:
                     ),
                     solution_commands = $2,
                     metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
-                    last_used = NOW(),
-                    last_updated = NOW()
+                    last_used_at = NOW(),
+                    updated_at = NOW()
                 WHERE id = $1
                 RETURNING id
             """
@@ -514,8 +584,8 @@ class LearningEngine:
                         success_count + failure_count + 1
                     ),
                     solution_commands = $2,
-                    last_used = NOW(),
-                    last_updated = NOW()
+                    last_used_at = NOW(),
+                    updated_at = NOW()
                 WHERE id = $1
                 RETURNING id
             """
@@ -526,8 +596,9 @@ class LearningEngine:
         """
         Calculate similarity between two symptom fingerprints.
 
-        Simple Jaccard similarity based on shared components.
-        Could be enhanced with more sophisticated ML in the future.
+        HIGH-008 FIX: Uses weighted Jaccard similarity where important labels
+        (alert name, host, container, service) contribute more to the score
+        than generic labels.
         """
         parts1 = set(fingerprint1.split('|'))
         parts2 = set(fingerprint2.split('|'))
@@ -535,16 +606,53 @@ class LearningEngine:
         if not parts1 or not parts2:
             return 0.0
 
-        intersection = len(parts1 & parts2)
-        union = len(parts1 | parts2)
+        # HIGH-008 FIX: Define weights for different label types
+        # Higher weights for more important distinguishing features
+        label_weights = {
+            'host': 3.0,        # Host is critical for routing
+            'container': 2.5,   # Container specificity
+            'service': 2.5,     # Service specificity
+            'system': 2.0,      # System (for backup alerts)
+            'job': 1.5,         # Job type
+            'severity': 1.0,    # Severity is common
+            'device': 2.0,      # Device specificity
+            'filesystem': 2.0,  # Filesystem specificity
+        }
+        default_weight = 1.0
+        alert_name_weight = 4.0  # Alert name is most important
 
-        return intersection / union if union > 0 else 0.0
+        def get_weight(part: str) -> float:
+            """Get weight for a fingerprint part."""
+            # First part (index 0) is always alert name
+            if ':' not in part:
+                return alert_name_weight
+            label = part.split(':')[0]
+            return label_weights.get(label, default_weight)
 
-    async def _refresh_pattern_cache(self):
-        """Refresh the in-memory pattern cache if needed."""
-        now = datetime.utcnow()
+        # Calculate weighted intersection and union
+        intersection = parts1 & parts2
+        union = parts1 | parts2
 
-        if (self._cache_timestamp is None or
+        weighted_intersection = sum(get_weight(p) for p in intersection)
+        weighted_union = sum(get_weight(p) for p in union)
+
+        return weighted_intersection / weighted_union if weighted_union > 0 else 0.0
+
+    async def _refresh_pattern_cache(self, force_refresh: bool = False):
+        """
+        Refresh the in-memory pattern cache if needed.
+
+        MEDIUM-002 FIX: Added force_refresh parameter to bypass TTL check.
+        MEDIUM-015 FIX: Uses timezone-aware datetime for accurate TTL checks.
+
+        Args:
+            force_refresh: If True, bypasses TTL check and refreshes immediately
+        """
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+
+        if (force_refresh or
+            self._cache_timestamp is None or
             now - self._cache_timestamp > self._cache_ttl):
 
             query = """
@@ -555,13 +663,15 @@ class LearningEngine:
                     symptom_fingerprint,
                     root_cause,
                     solution_commands,
+                    target_host,
                     success_count,
                     failure_count,
                     confidence_score,
                     risk_level,
                     usage_count,
                     avg_execution_time,
-                    last_used_at
+                    last_used_at,
+                    metadata
                 FROM remediation_patterns
                 WHERE enabled = TRUE
                 ORDER BY confidence_score DESC, usage_count DESC

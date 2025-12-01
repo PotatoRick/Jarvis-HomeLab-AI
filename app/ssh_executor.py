@@ -5,6 +5,9 @@ Uses asyncssh for non-blocking SSH operations.
 
 import asyncio
 import asyncssh
+import os
+import re
+import stat
 import structlog
 from typing import List, Tuple, Optional
 from datetime import datetime
@@ -12,6 +15,56 @@ from .config import settings
 from .models import HostType, SSHExecutionResult
 
 logger = structlog.get_logger()
+
+
+# SECURITY-003 FIX: Patterns that indicate potential command injection
+# Note: We allow 2>&1 (stderr redirect) as it's safe and commonly used
+DANGEROUS_COMMAND_PATTERNS = [
+    r';',                 # Command separator
+    r'(?<!\d)&(?![\d>])', # Ampersand (background) but not 2>&1 or &>
+    r'\|(?!\|)',          # Pipe (but not ||)
+    r'`',                 # Backtick command substitution
+    r'\$\(',              # Command substitution
+    r'\$\{',              # Variable expansion
+    r'\$[A-Za-z_]',       # Variable reference
+    r'>\s*/',             # Redirect to root paths
+    r'>>\s*/',            # Append to root paths
+    r'<\s*/',             # Read from root paths
+    r'\|\s*bash',         # Pipe to shell
+    r'\|\s*sh\b',         # Pipe to shell
+    r'\beval\s',          # Eval command
+    r'\bsource\s',        # Source command
+    r'\bexec\s',          # Exec command
+]
+
+# Compiled pattern for efficiency
+DANGEROUS_PATTERN_RE = re.compile('|'.join(DANGEROUS_COMMAND_PATTERNS))
+
+
+def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a command doesn't contain obvious injection attempts.
+
+    SECURITY-003 FIX: Checks for shell metacharacters and dangerous patterns.
+
+    Note: This is a defense-in-depth measure. The primary protection is the
+    command whitelist in the Claude agent. This catches anything that slips through.
+
+    Args:
+        command: Command string to validate
+
+    Returns:
+        Tuple of (is_safe: bool, reason: Optional[str])
+    """
+    if DANGEROUS_PATTERN_RE.search(command):
+        match = DANGEROUS_PATTERN_RE.search(command)
+        return False, f"Dangerous pattern detected: '{match.group()}'"
+
+    # Check for newlines (could be used to inject commands)
+    if '\n' in command or '\r' in command:
+        return False, "Newline characters not allowed in commands"
+
+    return True, None
 
 
 class SSHExecutor:
@@ -22,6 +75,7 @@ class SSHExecutor:
         self.logger = logger.bind(component="ssh_executor")
         self._connections = {}
         self.host_monitor = host_monitor  # Optional host monitor for tracking
+        self._keys_validated = False
 
         # Host configuration mapping
         self.host_config = {
@@ -46,6 +100,110 @@ class SSHExecutor:
                 "client_keys": [settings.ssh_skynet_key_path],
             },
         }
+
+    def validate_ssh_keys(self) -> dict:
+        """
+        Validate SSH keys exist and have correct permissions.
+
+        CRITICAL-003 FIX: Validates SSH key files on startup to fail fast with clear
+        error messages instead of cryptic SSH authentication failures.
+
+        Returns:
+            Dict with validation results for each host
+        """
+        results = {}
+        seen_keys = set()
+
+        for host_type, config in self.host_config.items():
+            host_name = host_type.value
+
+            # Skip localhost hosts (don't need SSH keys)
+            if config["host"] == "localhost":
+                results[host_name] = {"status": "skipped", "reason": "localhost"}
+                continue
+
+            for key_path in config["client_keys"]:
+                # Skip if we already checked this key
+                if key_path in seen_keys:
+                    continue
+                seen_keys.add(key_path)
+
+                # Check if file exists
+                if not os.path.exists(key_path):
+                    results[host_name] = {
+                        "status": "error",
+                        "key_path": key_path,
+                        "error": f"SSH key not found: {key_path}"
+                    }
+                    self.logger.error(
+                        "ssh_key_not_found",
+                        host=host_name,
+                        key_path=key_path
+                    )
+                    continue
+
+                # Check file permissions
+                try:
+                    file_stat = os.stat(key_path)
+                    mode = file_stat.st_mode & 0o777
+
+                    if mode != 0o600:
+                        results[host_name] = {
+                            "status": "error",
+                            "key_path": key_path,
+                            "permissions": oct(mode),
+                            "error": f"SSH key has insecure permissions {oct(mode)}, must be 0o600. "
+                                     f"Fix with: chmod 600 {key_path}"
+                        }
+                        self.logger.error(
+                            "ssh_key_permissions_invalid",
+                            host=host_name,
+                            key_path=key_path,
+                            actual_mode=oct(mode),
+                            required_mode="0o600"
+                        )
+                    else:
+                        results[host_name] = {
+                            "status": "ok",
+                            "key_path": key_path,
+                            "permissions": oct(mode)
+                        }
+                        self.logger.info(
+                            "ssh_key_validated",
+                            host=host_name,
+                            key_path=key_path
+                        )
+                except OSError as e:
+                    results[host_name] = {
+                        "status": "error",
+                        "key_path": key_path,
+                        "error": f"Cannot stat SSH key: {str(e)}"
+                    }
+                    self.logger.error(
+                        "ssh_key_stat_failed",
+                        host=host_name,
+                        key_path=key_path,
+                        error=str(e)
+                    )
+
+        self._keys_validated = True
+        return results
+
+    def get_key_validation_errors(self) -> list:
+        """
+        Get list of SSH key validation errors.
+
+        Returns:
+            List of error messages, empty if all keys are valid
+        """
+        results = self.validate_ssh_keys()
+        errors = []
+
+        for host, result in results.items():
+            if result["status"] == "error":
+                errors.append(f"{host}: {result['error']}")
+
+        return errors
 
     async def _get_connection(self, host: HostType) -> asyncssh.SSHClientConnection:
         """
@@ -152,6 +310,8 @@ class SSHExecutor:
         Retries on connection errors only (not command failures).
         Uses exponential backoff: 2s, 4s, 8s.
 
+        SECURITY-003 FIX: Validates command against dangerous patterns before execution.
+
         Args:
             host: Target host type
             command: Command to execute
@@ -161,6 +321,17 @@ class SSHExecutor:
         Returns:
             Tuple of (stdout, stderr, exit_code)
         """
+        # SECURITY-003 FIX: Validate command safety before execution
+        is_safe, reason = validate_command_safety(command)
+        if not is_safe:
+            self.logger.error(
+                "command_rejected_unsafe",
+                host=host.value,
+                command=command[:100] + "..." if len(command) > 100 else command,
+                reason=reason
+            )
+            return "", f"Command rejected: {reason}", -1
+
         timeout = timeout or settings.command_execution_timeout
 
         for attempt in range(max_retries):
@@ -233,8 +404,17 @@ class SSHExecutor:
                 if host in self._connections:
                     try:
                         self._connections[host].close()
-                    except:
-                        pass
+                        self.logger.debug(
+                            "stale_connection_closed",
+                            host=host.value
+                        )
+                    except Exception as cleanup_error:
+                        # MEDIUM-011 FIX: Log cleanup failures instead of silent pass
+                        self.logger.debug(
+                            "connection_cleanup_failed",
+                            host=host.value,
+                            error=str(cleanup_error)
+                        )
                     del self._connections[host]
 
                 # Exponential backoff: 2s, 4s, 8s
@@ -262,6 +442,9 @@ class SSHExecutor:
         """
         Execute command locally using subprocess.
 
+        HIGH-009 FIX: Handles sudo commands when running in Docker container.
+        Since container runs as root, sudo is unnecessary and may not exist.
+
         Args:
             command: Command to execute
             timeout: Execution timeout
@@ -270,6 +453,16 @@ class SSHExecutor:
             Tuple of (stdout, stderr, exit_code)
         """
         try:
+            # HIGH-009 FIX: Strip sudo from commands when running in container
+            # Container typically runs as root, and sudo may not be installed
+            if os.path.exists('/.dockerenv'):
+                if command.strip().startswith('sudo '):
+                    command = command.replace('sudo ', '', 1)
+                    self.logger.debug(
+                        "stripped_sudo_in_container",
+                        original_had_sudo=True
+                    )
+
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -295,6 +488,32 @@ class SSHExecutor:
         except Exception as e:
             return "", str(e), -1
 
+    def _is_diagnostic_command(self, command: str) -> bool:
+        """
+        Check if a command is a diagnostic/read-only command.
+
+        HIGH-002 FIX: Diagnostic commands should not stop batch execution on failure.
+        For example, 'systemctl status' returns non-zero for inactive services,
+        but we still want to run the restart command.
+
+        Args:
+            command: Command string to check
+
+        Returns:
+            True if command is diagnostic (continue on failure)
+        """
+        diagnostic_patterns = [
+            'status', 'ps ', 'ps|', 'logs ', 'journalctl', 'systemctl is-active',
+            'docker inspect', 'docker ps', 'cat ', 'head ', 'tail ', 'grep ',
+            'ls ', 'df ', 'du ', 'free', 'uptime', 'top -b', 'netstat', 'ss ',
+            'find ', 'which ', 'whereis ', 'file ', 'stat '
+        ]
+        cmd_lower = command.lower()
+        return any(pattern in cmd_lower for pattern in diagnostic_patterns)
+
+    # MEDIUM-003 FIX: Maximum command length to prevent injection/overflow
+    MAX_COMMAND_LENGTH = 10000
+
     async def execute_commands(
         self,
         host: HostType,
@@ -303,6 +522,11 @@ class SSHExecutor:
     ) -> SSHExecutionResult:
         """
         Execute a sequence of commands on a remote host.
+
+        HIGH-002 FIX: Diagnostic commands (status, logs, etc.) no longer stop
+        execution on failure. Only action commands stop the batch.
+
+        MEDIUM-003 FIX: Commands exceeding MAX_COMMAND_LENGTH are rejected.
 
         Args:
             host: Target host type
@@ -324,6 +548,19 @@ class SSHExecutor:
         )
 
         for cmd in commands:
+            # MEDIUM-003 FIX: Validate command length
+            if len(cmd) > self.MAX_COMMAND_LENGTH:
+                self.logger.error(
+                    "command_too_long",
+                    host=host.value,
+                    command_length=len(cmd),
+                    max_length=self.MAX_COMMAND_LENGTH,
+                    command_preview=cmd[:100] + "..."
+                )
+                outputs.append(f"Error: Command exceeds maximum length of {self.MAX_COMMAND_LENGTH} characters")
+                exit_codes.append(-1)
+                overall_success = False
+                break
             stdout, stderr, exit_code = await self.execute_command(host, cmd, timeout)
 
             output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}" if stderr else stdout
@@ -331,15 +568,28 @@ class SSHExecutor:
             exit_codes.append(exit_code)
 
             if exit_code != 0:
-                overall_success = False
-                self.logger.warning(
-                    "command_failed_in_batch",
-                    host=host.value,
-                    command=cmd,
-                    exit_code=exit_code
-                )
-                # Stop execution on first failure
-                break
+                is_diagnostic = self._is_diagnostic_command(cmd)
+
+                if is_diagnostic:
+                    # HIGH-002 FIX: Continue on diagnostic command failure
+                    self.logger.info(
+                        "diagnostic_command_failed_continuing",
+                        host=host.value,
+                        command=cmd,
+                        exit_code=exit_code
+                    )
+                    # Don't mark as overall failure for diagnostic commands
+                    continue
+                else:
+                    overall_success = False
+                    self.logger.warning(
+                        "command_failed_in_batch",
+                        host=host.value,
+                        command=cmd,
+                        exit_code=exit_code
+                    )
+                    # Stop execution on action command failure
+                    break
 
         end_time = datetime.utcnow()
         duration = int((end_time - start_time).total_seconds())

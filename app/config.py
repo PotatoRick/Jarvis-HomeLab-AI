@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "AI Remediation Service"
-    app_version: str = "3.0.0"
+    app_version: str = "3.3.1"
     debug: bool = False
 
     # API Server
@@ -31,17 +31,18 @@ class Settings(BaseSettings):
     claude_timeout: int = 60
 
     # SSH Configuration
+    # HIGH-003 FIX: All hosts use consistent key path /app/ssh_key (mounted in docker-compose.yml)
     ssh_nexus_host: str = "192.168.0.11"
     ssh_nexus_user: str = "jordan"
-    ssh_nexus_key_path: str = "/app/ssh-keys/homelab_ed25519"
+    ssh_nexus_key_path: str = "/app/ssh_key"
 
     ssh_homeassistant_host: str = "192.168.0.10"
     ssh_homeassistant_user: str = "root"
-    ssh_homeassistant_key_path: str = "/app/ssh-keys/homelab_ed25519"
+    ssh_homeassistant_key_path: str = "/app/ssh_key"
 
     ssh_outpost_host: str = "localhost"
     ssh_outpost_user: str = "root"
-    ssh_outpost_key_path: str = "/app/ssh-keys/homelab_ed25519"
+    ssh_outpost_key_path: str = "/app/ssh_key"
 
     # Skynet - where Jarvis runs, but SSH to access host filesystem
     ssh_skynet_host: str = "192.168.0.13"
@@ -57,9 +58,13 @@ class Settings(BaseSettings):
 
     # Remediation Settings
     max_attempts_per_alert: int = 3
-    attempt_window_hours: int = 24
+    attempt_window_hours: int = 2
     command_execution_timeout: int = 60
     maintenance_mode: bool = False
+
+    # Anti-Spam Settings (v3.1.0)
+    fingerprint_cooldown_seconds: int = 300  # 5 minutes - don't reprocess same alert
+    escalation_cooldown_hours: int = 4       # 4 hours - don't re-escalate same alert
 
     # Security
     webhook_auth_username: str = "alertmanager"

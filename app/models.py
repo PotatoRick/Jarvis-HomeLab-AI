@@ -95,10 +95,6 @@ class ClaudeAnalysis(BaseModel):
     expected_outcome: str = Field(..., description="Expected result after execution")
     reasoning: str = Field(..., description="Explanation of why these commands will work")
     estimated_duration: str = Field(default="30 seconds", description="Expected execution time")
-    target_host: Optional[str] = Field(default=None, description="Host where commands should run (may differ from alert instance)")
-    confidence: float = Field(default=0.5, description="Confidence level 0.0-1.0")
-    investigation_steps: List[dict] = Field(default=[], description="Steps taken to investigate")
-    instance_label_misleading: bool = Field(default=False, description="True if alert instance doesn't match remediation host")
 
 
 class CommandValidationResult(BaseModel):
@@ -125,25 +121,6 @@ class HostType(str, Enum):
     HOMEASSISTANT = "homeassistant"
     OUTPOST = "outpost"
     SKYNET = "skynet"
-
-
-class ConfidenceLevel(str, Enum):
-    """Confidence level for remediation actions - gates what operations are allowed."""
-    UNCERTAIN = "uncertain"      # < 30% - Can only run read-only diagnostic commands
-    LOW = "low"                  # 30-50% - Can run safe investigative commands
-    MEDIUM = "medium"            # 50-70% - Can run safe restarts with verification
-    HIGH = "high"                # 70-90% - Can run learned patterns
-    VERY_HIGH = "very_high"      # > 90% - Can run without AI (pattern match)
-
-
-class InvestigationStep(BaseModel):
-    """A single step in an investigation chain."""
-    tool: str = Field(..., description="Tool used (e.g., read_file, check_crontab)")
-    host: str = Field(..., description="Host where command was run")
-    command: str = Field(..., description="Actual command executed")
-    purpose: str = Field(..., description="Why this step was taken")
-    result_summary: str = Field(default="", description="Summary of what was learned")
-    confidence_delta: float = Field(default=0.0, description="How much this step changed confidence")
 
 
 class LogGatherRequest(BaseModel):

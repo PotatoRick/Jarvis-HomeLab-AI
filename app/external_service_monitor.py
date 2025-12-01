@@ -317,3 +317,37 @@ class ExternalServiceMonitor:
         """Clear health check cache (force fresh checks)"""
         self._health_cache.clear()
         self.logger.info("service_health_cache_cleared")
+
+    def cleanup_stale_cache(self, max_age_minutes: int = 30) -> int:
+        """
+        Remove stale entries from cache without clearing everything.
+
+        MEDIUM-006 FIX: Periodic cleanup prevents unbounded cache growth
+        and removes entries older than max_age_minutes.
+
+        Args:
+            max_age_minutes: Remove entries older than this (default 30 minutes)
+
+        Returns:
+            Number of entries removed
+        """
+        now = datetime.utcnow()
+        max_age = timedelta(minutes=max_age_minutes)
+        stale_keys = []
+
+        for key, health in self._health_cache.items():
+            age = now - health.last_checked
+            if age > max_age:
+                stale_keys.append(key)
+
+        for key in stale_keys:
+            del self._health_cache[key]
+
+        if stale_keys:
+            self.logger.info(
+                "stale_cache_entries_removed",
+                removed_count=len(stale_keys),
+                removed_services=stale_keys
+            )
+
+        return len(stale_keys)
