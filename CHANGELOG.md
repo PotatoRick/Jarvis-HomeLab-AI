@@ -5,6 +5,541 @@ All notable changes to Jarvis AI Remediation Service will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.0] - 2025-12-01
+
+### Phase 4: Self-Sufficiency Roadmap - Polish & Scale
+
+**"Jarvis now exposes Prometheus metrics for self-monitoring and uses runbooks for structured remediation guidance"**
+
+This release implements Phase 4 of the Self-Sufficiency Roadmap, targeting improvement from 85% to 95%+ success rate through:
+
+1. **Prometheus Metrics Export** - Self-monitoring via `/metrics` endpoint
+2. **Runbook Integration** - Structured remediation guidance for Claude
+
+### Added
+
+#### Prometheus Metrics Export
+- **New file**: `app/metrics.py` - Prometheus metric definitions and recording
+  - `remediation_total` - Counter of remediation attempts by alert and status
+  - `pattern_matches` - Counter of pattern cache hits vs API calls
+  - `api_calls` - Counter of Claude API calls by model and status
+  - `command_executions` - Counter of SSH commands by host and result
+  - `alerts_received` - Counter of alerts from Alertmanager
+  - `verification_results` - Counter of verification outcomes
+  - `proactive_checks` - Counter of proactive monitoring results
+  - `rollback_operations` - Counter of rollback attempts
+  - `n8n_workflow_executions` - Counter of n8n workflow triggers
+  - `remediation_duration` - Histogram of remediation durations
+  - `api_call_duration` - Histogram of Claude API latency
+  - `ssh_execution_duration` - Histogram of SSH command latency
+  - `active_remediations` - Gauge of currently processing alerts
+  - `database_connected` - Gauge of database connection status
+  - `pattern_count` - Gauge of learned patterns by confidence
+  - `queue_depth` - Gauge of queued alerts (degraded mode)
+  - `maintenance_mode` - Gauge of maintenance status
+  - `proactive_monitor_running` - Gauge of proactive monitor status
+  - `build_info` - Info metric with version details
+- **New endpoint**: `GET /metrics` - Prometheus-compatible metrics endpoint
+
+**Example Prometheus Configuration:**
+```yaml
+- job_name: 'jarvis'
+  static_configs:
+    - targets: ['your-jarvis-host:8000']
+```
+
+#### Runbook Integration
+- **New file**: `app/runbook_manager.py` - Runbook loading and management
+  - `load_runbooks()` - Load all markdown runbooks from directory
+  - `get_runbook()` - Retrieve runbook for specific alert type
+  - `get_runbook_context()` - Format runbook for Claude system prompt
+  - `list_runbooks()` - List all available runbooks
+  - `reload()` - Hot reload runbooks without restart
+- **New directory**: `runbooks/` - Markdown runbook files
+  - `ContainerDown.md` - Container restart and recovery procedures
+  - `WireGuardVPNDown.md` - Cross-system VPN troubleshooting
+  - `DiskSpaceLow.md` - Disk cleanup and space recovery
+  - `HighMemoryUsage.md` - Memory pressure diagnosis and resolution
+  - `BackupStale.md` - Backup system troubleshooting
+- **New endpoints**:
+  - `GET /runbooks` - List all available runbooks
+  - `GET /runbooks/{alert_name}` - Get specific runbook details
+  - `POST /runbooks/reload` - Hot reload runbooks from disk
+- **Claude integration**: Runbooks automatically included in analysis prompts
+
+**Runbook Format:**
+```markdown
+# AlertName Remediation Runbook
+
+<!-- risk_level: medium -->
+<!-- estimated_duration: 5-10 minutes -->
+
+## Overview
+Brief description of the alert and its impact.
+
+## Investigation Steps
+1. First thing to check
+2. Second thing to check
+
+## Common Causes
+- Cause 1
+- Cause 2
+
+## Remediation Steps
+1. Do this first
+2. Then this
+
+## Commands
+```bash
+# Commands Claude can use
+docker restart container
+```
+```
+
+### Changed
+
+- **Claude Agent**: Now includes runbook context in analysis prompts
+- **Main Application**: Initializes metrics and runbook manager on startup
+- **Dockerfile**: Now copies `runbooks/` directory into container
+- **Requirements**: Added `prometheus-client==0.21.0`
+- **Version**: Bumped to 3.8.0
+
+### Metrics Recording
+
+Metrics are automatically recorded throughout the remediation pipeline:
+- Alert received → `alerts_received` counter incremented
+- Remediation complete → `remediation_total` counter + duration histogram
+- Pattern used → `pattern_matches` counter (hit/miss)
+- API call made → `api_calls` counter + duration histogram
+- SSH command executed → `command_executions` counter
+
+### Technical Details
+
+**Metrics Endpoint:**
+- Path: `/metrics`
+- Format: Prometheus text exposition format
+- No authentication required (internal network only)
+
+**Runbook Loading:**
+- Default path: `/app/runbooks/` (Docker) or `./runbooks/` (local dev)
+- Format: Markdown with optional YAML frontmatter
+- Hot reload: `POST /runbooks/reload`
+
+### Migration Notes
+
+1. No database migration required
+2. Add Prometheus scrape target for `/metrics` endpoint
+3. Optionally add custom runbooks to `runbooks/` directory
+4. Rebuild Docker image to include new runbook files
+
+---
+
+## [3.7.0] - 2025-12-01
+
+### Phase 3: Self-Sufficiency Roadmap - Advanced Capabilities
+
+**"Jarvis now orchestrates complex workflows, proactively detects issues, and can rollback failed changes"**
+
+This release implements Phase 3 of the Self-Sufficiency Roadmap, targeting improvement from 70% to 85% success rate through three key enhancements:
+
+1. **n8n Workflow Orchestration** - Execute multi-step remediation workflows
+2. **Proactive Issue Detection** - Detect and fix issues before alerts fire
+3. **Rollback Capability** - Snapshot state before changes, enable recovery
+
+### Added
+
+#### n8n Workflow Orchestration
+- **New file**: `app/n8n_client.py` - n8n API client for workflow execution
+  - `execute_workflow()` - Trigger workflow and optionally wait for completion
+  - `execute_workflow_by_name()` - Find and execute workflow by name
+  - `list_workflows()` - List all available workflows
+  - `get_execution_status()` - Check workflow execution status
+  - `trigger_webhook()` - Trigger webhook-based workflows
+- **New Claude tools**:
+  - `execute_n8n_workflow` - Execute workflow for complex operations
+  - `list_n8n_workflows` - Discover available workflows
+- **Database table**: `n8n_executions` - Track workflow executions
+
+**Known Jarvis Workflows:**
+- `jarvis-database-recovery` - Database backup, restore, and verify
+- `jarvis-certificate-renewal` - Certificate renewal and deployment
+- `jarvis-full-health-check` - Comprehensive system health check
+- `jarvis-docker-cleanup` - Clean up Docker resources across systems
+
+#### Proactive Issue Detection
+- **New file**: `app/proactive_monitor.py` - Background monitoring for preventable issues
+  - `check_disk_fill_rates()` - Predict disk exhaustion, cleanup if <6h remaining
+  - `check_certificate_expiry()` - Warn if certs expire in <30 days
+  - `check_memory_trends()` - Detect container memory leaks
+  - `check_container_restarts()` - Detect restart loops
+  - `check_backup_freshness()` - Verify backups are recent
+- **Database table**: `proactive_checks` - Log proactive findings and actions
+- **Discord notifications**: Proactive alerts sent as orange embeds
+
+**Proactive Checks (Default: every 5 minutes):**
+- Disk fill rate prediction (warn if <24h to exhaustion)
+- Certificate expiry monitoring (warn if <30 days)
+- Memory leak detection (>5MB/hour growth rate)
+- Container restart loop detection (>3 restarts/hour)
+- Backup freshness verification (>36 hours stale)
+
+#### Rollback Capability
+- **New file**: `app/rollback_manager.py` - State snapshot and recovery
+  - `snapshot_container_state()` - Capture container state before changes
+  - `snapshot_service_state()` - Capture systemd service state
+  - `rollback_container()` - Restore container to snapshot state
+  - `should_rollback()` - Analyze if rollback is recommended
+  - `list_recent_snapshots()` - View recent snapshots
+- **Database table**: `state_snapshots` - Store state snapshots with 24h retention
+
+### Changed
+
+- **Application startup**: Now initializes n8n client, proactive monitor, and rollback manager
+- **Application shutdown**: Properly stops proactive monitoring loop
+- **Version**: Bumped to 3.7.0
+
+### Configuration
+
+New settings in `app/config.py`:
+```python
+# Phase 3: n8n workflow orchestration
+n8n_url: str = "http://localhost:5678"
+n8n_api_key: Optional[str] = None
+
+# Phase 3: Proactive monitoring
+proactive_monitoring_enabled: bool = True
+proactive_check_interval: int = 300  # 5 minutes
+disk_exhaustion_warning_hours: int = 24
+cert_expiry_warning_days: int = 30
+memory_leak_threshold_mb_per_hour: float = 5.0
+```
+
+### Technical Details
+
+**n8n Workflow Tool:**
+```json
+{
+  "name": "execute_n8n_workflow",
+  "input_schema": {
+    "workflow_name": "jarvis-database-recovery",
+    "data": {"optional": "input data"},
+    "wait_for_completion": true
+  }
+}
+```
+
+**Proactive Monitoring Flow:**
+1. Every 5 minutes, run all check functions
+2. Query Prometheus for predictive metrics
+3. If issue predicted (e.g., disk fills in <24h):
+   - Log to `proactive_checks` table
+   - Send Discord notification (4-hour cooldown)
+   - Optionally take preemptive action (cleanup, restart)
+
+**Rollback Flow:**
+1. Before remediation, capture current state
+2. Store snapshot in database
+3. If remediation fails or makes things worse:
+   - Analyze `should_rollback()`
+   - Execute `rollback_container()` (restart container)
+4. Snapshots auto-expire after 24 hours
+
+### Migration Notes
+
+1. Database migration required - run `init-db.sql` to create new tables:
+   - `proactive_checks` - Proactive monitoring log
+   - `state_snapshots` - Rollback snapshots
+   - `n8n_executions` - Workflow execution tracking
+2. Set `N8N_API_KEY` environment variable if using n8n integration
+3. Proactive monitoring is enabled by default, disable with `PROACTIVE_MONITORING_ENABLED=false`
+
+---
+
+## [3.6.0] - 2025-12-01
+
+### Phase 2: Self-Sufficiency Roadmap - Intelligence
+
+**"Jarvis now understands metric trends, correlates related alerts, and can restart Home Assistant addons"**
+
+This release implements Phase 2 of the Self-Sufficiency Roadmap, targeting improvement from 50% to 70% success rate through three key enhancements:
+
+1. **Prometheus Metric History** - Understand trends, predict exhaustion, correlate with events
+2. **Root Cause Correlation** - Identify root cause when multiple alerts fire together
+3. **Home Assistant Integration** - Restart addons and reload automations via Supervisor API
+
+### Added
+
+#### Prometheus Metric History Tool
+- **Enhanced `app/prometheus_client.py`**:
+  - `get_metric_trend()` - Analyze metric trends (current, min, max, avg, trend direction)
+  - `predict_exhaustion()` - Predict when resources will hit threshold (hours remaining)
+- **New Claude tool**: `query_metric_history`
+  - Query metric trends for memory, disk, CPU over time
+  - Optional exhaustion prediction for proactive remediation
+  - Helps Claude understand if problems are getting worse
+
+#### Root Cause Alert Correlation
+- **New file**: `app/alert_correlator.py` - Correlation engine for root cause analysis
+  - `DEPENDENCIES` map - Service dependency tree (grafana->prometheus, zigbee2mqtt->mosquitto, etc.)
+  - `CASCADE_PATTERNS` - Known cascade patterns (VPN down -> remote services, Docker down -> containers)
+  - `correlate_alert()` - Check if alert correlates with others
+  - `get_correlation_context()` - Generate context string for Claude
+  - `should_skip_alert()` - Determine if alert should be skipped (not root cause)
+- **Integration in `app/main.py`**:
+  - Correlator initialized on startup
+  - Each alert checked for correlation before processing
+  - Dependent alerts skipped while root cause is being handled
+  - Correlation context added to Claude's system prompt
+
+#### Home Assistant Supervisor API Integration
+- **New file**: `app/homeassistant_client.py` - HA Supervisor API client
+  - `restart_addon()` - Restart HA addons (Zigbee2MQTT, Mosquitto, etc.)
+  - `get_addon_info()` - Get addon status, version, state
+  - `reload_automations()` - Reload all automations
+  - `reload_scripts()` - Reload all scripts
+  - `call_service()` - Call any HA service
+  - `restart_core()` - Restart Home Assistant Core
+  - `ADDON_SLUGS` - Common addon name to slug mapping
+- **New Claude tools**:
+  - `restart_ha_addon` - Restart HA addon by name or slug
+  - `reload_ha_automations` - Reload all automations
+  - `get_ha_addon_info` - Get addon status info
+
+### Changed
+
+- **Alert processing flow**: Now checks for alert correlation before remediation
+- **Claude context**: Receives correlation information when alerts are related
+- **Dependent alerts**: Automatically skipped when root cause is being handled
+- **Version**: Bumped to 3.6.0
+
+### Configuration
+
+New settings in `app/config.py`:
+```python
+# Phase 2: Home Assistant integration
+ha_url: str = "http://localhost:8123"
+ha_supervisor_url: str = "http://supervisor/core"
+ha_token: Optional[str] = None  # Long-lived access token
+```
+
+### Technical Details
+
+**Alert Correlation Flow:**
+1. Alert received from Alertmanager
+2. Check against cascade patterns (VPN+Outpost, Docker+Containers, etc.)
+3. Check against dependency map (service dependencies)
+4. Check for same-host correlation (multiple alerts on same host)
+5. If correlated and not root cause: Skip alert, return status "skipped"
+6. If root cause: Add correlation context to Claude prompt
+
+**Supported Cascade Patterns:**
+- `WireGuardVPNDown` -> `OutpostDown`, `N8NDown`, `ActualBudgetDown`
+- `DockerDaemonUnresponsive` -> `ContainerDown`, `ContainerUnhealthy`
+- `HighMemoryUsage` -> `ContainerOOMKilled`
+- `DiskSpaceCritical` -> `ContainerDown`
+- `PostgreSQLDown` -> `N8NDown`, `GrafanaDown`
+- `MQTTBrokerDown` -> `Zigbee2MQTTDown`
+- `AdGuardDown` -> `DNSResolutionFailed`
+
+**Home Assistant Tools:**
+```json
+{
+  "name": "restart_ha_addon",
+  "input_schema": {
+    "addon_slug": "zigbee2mqtt|mosquitto|matter|etc."
+  }
+}
+{
+  "name": "reload_ha_automations",
+  "input_schema": {}
+}
+{
+  "name": "get_ha_addon_info",
+  "input_schema": {
+    "addon_slug": "addon name or full slug"
+  }
+}
+```
+
+### Migration Notes
+
+1. Set `HA_TOKEN` environment variable with long-lived access token if using HA integration
+2. HA integration is optional - Jarvis works without it but can't restart addons
+3. No database migration required for this release
+
+---
+
+## [3.5.0] - 2025-12-01
+
+### Phase 1: Self-Sufficiency Roadmap - Foundation
+
+**"Jarvis now verifies fixes actually worked instead of just checking exit codes"**
+
+This release implements Phase 1 of the Self-Sufficiency Roadmap, targeting improvement from 22% to 50% success rate through three key enhancements:
+
+1. **Alert Verification Loop** - Query Prometheus after remediation to verify alerts resolved
+2. **Loki Log Context** - Give Claude access to aggregated logs for better diagnosis
+3. **Failure Pattern Learning** - Track what doesn't work to avoid repeating mistakes
+
+### Added
+
+#### Prometheus Alert Verification
+- **New file**: `app/prometheus_client.py` - Prometheus API client for alert verification
+  - `get_alert_status()` - Check if alert is firing, pending, or resolved
+  - `verify_remediation()` - Poll Prometheus to confirm fix worked
+  - `query_instant()` and `query_range()` - PromQL query support
+  - `get_metric_trend()` - Analyze metric trends over time
+  - `predict_exhaustion()` - Predict when resources will exhaust (Phase 2 prep)
+- Verification occurs after successful command execution (before declaring success)
+- Configurable timeouts: `verification_max_wait_seconds`, `verification_poll_interval`
+- Graceful fallback to exit code success if Prometheus unavailable
+
+#### Loki Log Context for Claude
+- **New file**: `app/loki_client.py` - Loki API client for centralized log queries
+  - `get_container_errors()` - Recent errors from specific container
+  - `get_service_logs()` - All logs from a service
+  - `search_logs()` - Pattern search across all logs
+  - `get_logs_around_time()` - Logs around specific timestamp for correlation
+- **New Claude tool**: `query_loki_logs` - Claude can now query Loki directly
+  - Query types: `container_errors`, `service_logs`, `search`
+  - No SSH required - direct API access to aggregated logs
+
+#### Failure Pattern Learning
+- **New database table**: `remediation_failures`
+  - Tracks failed remediation patterns with signatures
+  - Records failure count, reason, and commands attempted
+- **New learning engine methods**:
+  - `record_failure_pattern()` - Store failed attempts
+  - `get_failed_patterns()` - Retrieve failures for an alert type
+  - `should_avoid_commands()` - Check if commands have repeatedly failed
+  - `get_failure_stats()` - Statistics on failure patterns
+
+### Changed
+
+- **Success determination**: Now requires Prometheus verification (exit code + alert resolved)
+- **Pattern learning**: Only learns from VERIFIED successful remediations
+- **Failure handling**: Records failure patterns for future avoidance
+- **Response format**: API now includes `verified` and `verification_message` fields
+
+### Configuration
+
+New settings in `app/config.py`:
+```python
+prometheus_url: str = "http://localhost:9090"
+loki_url: str = "http://localhost:3100"
+verification_enabled: bool = True
+verification_max_wait_seconds: int = 120
+verification_poll_interval: int = 10
+verification_initial_delay: int = 10
+```
+
+### Technical Details
+
+**Verification Flow:**
+1. Execute remediation commands
+2. If commands succeed (exit code 0):
+   a. Wait `initial_delay` seconds for fix to take effect
+   b. Poll Prometheus every `poll_interval` seconds
+   c. Check if alert state is "resolved"
+   d. Continue up to `max_wait_seconds`
+3. If verified: Success, learn pattern
+4. If not verified: Failure, record failure pattern, potentially escalate
+
+**Loki Query Tool:**
+```json
+{
+  "name": "query_loki_logs",
+  "input_schema": {
+    "query_type": "container_errors|service_logs|search",
+    "target": "container/service name or search pattern",
+    "minutes": 15
+  }
+}
+```
+
+### Migration Notes
+
+1. Database migration required - run `init-db.sql` to create `remediation_failures` table
+2. Prometheus URL will default to `http://localhost:9090` if not set
+3. Loki URL will default to `http://localhost:3100` if not set
+4. Verification can be disabled with `VERIFICATION_ENABLED=false` for testing
+
+### Roadmap Progress
+
+| Metric | Before | After Phase 1 | Target |
+|--------|--------|---------------|--------|
+| Success Rate | 22.2% | 50% (target) | 95%+ |
+| Escalation Rate | 63% | 40% (target) | <10% |
+| Pattern Coverage | 25 | 35 (target) | 80+ |
+
+Next: Phase 2 (Weeks 3-6) - Prometheus metric history, root cause correlation, HA integration
+
+## [3.4.0] - 2025-12-01
+
+### BackupStale Pattern Matching Fixes
+
+**"Jarvis can now properly identify which system's backup is stale and run the correct fix"**
+
+This release fixes critical issues with BackupStale alert handling where Jarvis was:
+1. Not recognizing the `system` label in alerts (e.g., `system=skynet`)
+2. Matching generic patterns instead of system-specific patterns
+3. Generating wrong commands like `docker run skynet-backup` (doesn't exist)
+
+### Fixed
+
+#### Critical Pattern Matching Fixes
+- **PATTERN-001**: Learning engine now uses `system` label for fingerprinting
+  - Added `system`, `remediation_host`, and `category` as priority labels
+  - These labels are checked first when building symptom fingerprints
+  - Example: BackupStale alerts now fingerprint as `BackupStale|system:skynet` instead of just `BackupStale`
+  - Location: `learning_engine.py:_build_symptom_fingerprint()`
+
+- **PATTERN-002**: Pattern matching now checks `target_host` in database
+  - Patterns with `target_host` column are now matched against alert's `system` or `remediation_host` labels
+  - Generic patterns (no `target_host`) are skipped when alert has system info
+  - Prevents matching wrong patterns (e.g., homeassistant pattern for skynet backup)
+  - Location: `learning_engine.py:find_similar_patterns()`
+
+- **PATTERN-003**: Improved similarity calculation for subset matching
+  - If a stored pattern is a subset of the incoming alert, it now scores high (0.7+)
+  - Critical labels (`system:`, `container:`, `remediation_host:`) must match for high confidence
+  - Location: `learning_engine.py:_calculate_similarity()`
+
+- **PATTERN-004**: Fixed pre-seeded BackupStale patterns in database
+  - Pattern ID 23: `system:homeassistant` → runs on `skynet` (HA backup script)
+  - Pattern ID 24: `system:nexus` → runs on `nexus`
+  - Pattern ID 25: `system:skynet` → runs on `skynet` (backup_skynet.sh)
+  - Pattern ID 26: `system:outpost` → runs on `outpost`
+  - Deleted broken generic pattern (ID 28) with wrong commands
+
+#### Safe Pipe Commands
+- **PIPE-001**: Added safe pipe command whitelist for diagnostics
+  - `dmesg | tail`, `dmesg | grep`, `docker ps | grep`, etc. now allowed
+  - Prevents blocking legitimate diagnostic commands during investigation
+  - Commands must match both left and right side patterns to be allowed
+  - Still blocks dangerous pipes like `curl | bash`, arbitrary pipes
+  - Location: `ssh_executor.py:SAFE_PIPE_PATTERNS`, `_is_safe_pipe_command()`
+
+### Technical Details
+
+**Root Cause Analysis:**
+The original `DANGEROUS_COMMAND_PATTERNS` blocked ALL pipes (`\|(?!\|)`) which:
+1. Blocked `gather_logs()` from running `dmesg | tail -N`
+2. Blocked Claude's diagnostic commands like `docker ps | grep backup`
+3. Forced Claude to generate alternative (wrong) commands
+
+**Solution:**
+1. Removed blanket pipe blocking from `DANGEROUS_COMMAND_PATTERNS`
+2. Added explicit `SAFE_PIPE_PATTERNS` whitelist for known-safe diagnostic pipes
+3. Added `_is_safe_pipe_command()` to validate pipe commands against whitelist
+4. Still blocks `| bash`, `| sh`, and arbitrary unknown pipes
+
+**Testing:**
+- Sent test BackupStale alert with `system=skynet` label
+- Jarvis correctly matched pattern ID 25 (`target_host=skynet`)
+- Executed backup script on correct host
+- Backup completed successfully, verified against B2
+
 ## [3.3.1] - 2025-12-01
 
 ### QA Review Bug Fixes (Part 2)
@@ -328,11 +863,8 @@ This release fixes a critical issue where Jarvis was executing backup remediatio
 #### New Pre-Seeded Backup Patterns
 | Alert | Target Host | Solution |
 |-------|-------------|----------|
-| BackupStale (homeassistant) | skynet | `/home/t1/homelab/scripts/backup/backup_homeassistant_notify.sh` |
-| BackupStale (nexus) | nexus | `cd /home/jordan/docker/home-stack && ./backup.sh` |
-| BackupStale (skynet) | skynet | `/home/t1/homelab/scripts/backup/backup_skynet.sh` |
-| BackupStale (outpost) | outpost | `cd /opt/burrow && ./backup.sh` |
-| BackupHealthCheckStale | skynet | `/home/t1/homelab/scripts/backup/check_b2_backups.sh` |
+| BackupStale (system) | varies | Run the appropriate backup script for the system |
+| BackupHealthCheckStale | management-host | Run backup health check script |
 
 ### Changed
 
@@ -347,7 +879,7 @@ This release fixes a critical issue where Jarvis was executing backup remediatio
 - Pattern creation supports `target_host` parameter
 
 #### Backup Check Script
-- `/home/t1/homelab/scripts/backup/check_b2_backups.sh` now checks both Daily and Sunday folders
+- Backup health check script now checks both Daily and Sunday backup folders
 - Previously only checked Daily, causing false positives on weekends
 
 ### Fixed
@@ -376,7 +908,7 @@ WHERE alert_name = 'BackupStale' AND alert_instance LIKE '%homeassistant%';
     remediation_host: skynet  # NEW: Where to run fixes
   annotations:
     remediation_hint: "Run backup script on Skynet"
-    remediation_commands: "/home/t1/homelab/scripts/backup/backup_homeassistant_notify.sh"
+    remediation_commands: "/path/to/backup_script.sh"
     data_flow: "Skynet pulls HA backup -> uploads to B2 -> updates metrics"
 ```
 
@@ -520,7 +1052,7 @@ This release fundamentally transforms how Jarvis approaches alert remediation. I
 - **Adaptive Iteration Limits**: 10 base iterations, extends to 15 if making progress
 
 #### Skynet Host Support
-- Jarvis can now investigate and remediate on Skynet (192.168.0.13) where it runs
+- Jarvis can now investigate and remediate on the local host where it runs
 - Local execution via subprocess when targeting Skynet
 - Essential for backup health check alerts that originate from Skynet cron jobs
 
@@ -609,7 +1141,7 @@ class ConfidenceLevel(str, Enum):
 - Backup scripts now exit with error code on upload failure (enables proper alert triggering)
 
 ### Infrastructure
-- All backup destinations changed from `gdrive:` to `b2:theburrow-backups/`
+- All backup destinations changed from Google Drive to Backblaze B2
 - B2 Application Key configured on all 3 systems (never expires, unlike OAuth tokens)
 
 ## [2.0.0] - 2025-11-14

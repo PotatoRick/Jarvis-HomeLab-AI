@@ -3,15 +3,8 @@ Machine Learning Engine for Alert Remediation
 
 Learns patterns from successful remediations and applies them automatically
 to reduce AI API usage and improve response times.
-
-v3.0 ENHANCEMENTS:
-- Stores investigation chains (not just fix commands)
-- Tracks source vs instance host mismatches
-- Learns which hosts to check for specific alert types
-- Skynet host support
 """
 
-import json
 import structlog
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -49,10 +42,7 @@ class LearningEngine:
     async def extract_pattern(
         self,
         attempt: RemediationAttempt,
-        alert_labels: Dict[str, str],
-        investigation_chain: Optional[List[Dict]] = None,
-        actual_remediation_host: Optional[str] = None,
-        instance_was_misleading: bool = False
+        alert_labels: Dict[str, str]
     ) -> Optional[int]:
         """
         Extract a remediation pattern from a successful attempt.
@@ -60,15 +50,9 @@ class LearningEngine:
         Creates or updates a pattern in the database based on the successful
         remediation. Uses intelligent fingerprinting to group similar issues.
 
-        v3.0: Now stores investigation chains and tracks host mismatches.
-        CRITICAL-005 FIX: Added input validation and proper error handling.
-
         Args:
             attempt: Successful remediation attempt
             alert_labels: Alert labels for categorization
-            investigation_chain: v3.0 - Steps taken to investigate
-            actual_remediation_host: v3.0 - Where fix was actually applied (may differ from instance)
-            instance_was_misleading: v3.0 - True if instance label didn't match remediation host
 
         Returns:
             Pattern ID if created/updated, None on failure
@@ -86,109 +70,57 @@ class LearningEngine:
             alert_labels
         )
 
-        # CRITICAL-005 FIX: Truncate fingerprint if too long
-        max_fingerprint_len = 5000
-        if len(symptom_fingerprint) > max_fingerprint_len:
-            symptom_fingerprint = symptom_fingerprint[:max_fingerprint_len]
-            self.logger.warning(
-                "symptom_fingerprint_truncated",
-                original_length=len(symptom_fingerprint),
-                max_length=max_fingerprint_len
-            )
-
         # Determine alert category
         category = self._categorize_alert(attempt.alert_name)
 
         # Extract root cause from AI analysis
         root_cause = self._extract_root_cause(attempt.ai_analysis)
 
-        # v3.0: Build enhanced metadata
-        metadata = {
-            "investigation_chain": investigation_chain or [],
-            "actual_remediation_host": actual_remediation_host,
-            "instance_label_misleading": instance_was_misleading,
-            "alert_instance": attempt.alert_instance,
-        }
-
-        # CRITICAL-005 FIX: Validate metadata is JSON serializable
-        try:
-            import json
-            json.dumps(metadata)
-        except (TypeError, ValueError) as e:
-            self.logger.error(
-                "metadata_not_json_serializable",
-                error=str(e),
-                alert_name=attempt.alert_name
-            )
-            # Use minimal metadata instead of failing completely
-            metadata = {
-                "alert_instance": attempt.alert_instance,
-                "serialization_error": str(e)
-            }
-
         self.logger.info(
             "extracting_pattern",
             alert_name=attempt.alert_name,
             category=category,
-            symptom=symptom_fingerprint[:100],
-            investigation_steps=len(investigation_chain) if investigation_chain else 0,
-            instance_misleading=instance_was_misleading
+            symptom=symptom_fingerprint[:100]
         )
 
-        try:
-            # Check if pattern exists
-            existing_pattern = await self._find_existing_pattern(
-                attempt.alert_name,
-                symptom_fingerprint
+        # Check if pattern exists
+        existing_pattern = await self._find_existing_pattern(
+            attempt.alert_name,
+            symptom_fingerprint
+        )
+
+        if existing_pattern:
+            # Update existing pattern
+            pattern_id = await self._update_pattern(
+                existing_pattern['id'],
+                attempt.commands_executed,
+                success=True
             )
-
-            if existing_pattern:
-                # Update existing pattern
-                pattern_id = await self._update_pattern(
-                    existing_pattern['id'],
-                    attempt.commands_executed,
-                    success=True,
-                    metadata=metadata
-                )
-                self.logger.info(
-                    "pattern_updated",
-                    pattern_id=pattern_id,
-                    new_success_count=existing_pattern['success_count'] + 1
-                )
-            else:
-                # Create new pattern
-                pattern_id = await self._create_pattern(
-                    alert_name=attempt.alert_name,
-                    category=category,
-                    symptom_fingerprint=symptom_fingerprint,
-                    root_cause=root_cause,
-                    solution_commands=attempt.commands_executed,
-                    risk_level=attempt.risk_level,
-                    metadata=metadata
-                )
-                self.logger.info(
-                    "pattern_created",
-                    pattern_id=pattern_id,
-                    alert_name=attempt.alert_name,
-                    has_investigation_chain=bool(investigation_chain)
-                )
-
-            # Invalidate cache
-            self._cache_timestamp = None
-
-            return pattern_id
-
-        except Exception as e:
-            # CRITICAL-005 FIX: Log error with full context but don't crash
-            self.logger.error(
-                "pattern_extraction_database_error",
+            self.logger.info(
+                "pattern_updated",
+                pattern_id=pattern_id,
+                new_success_count=existing_pattern['success_count'] + 1
+            )
+        else:
+            # Create new pattern
+            pattern_id = await self._create_pattern(
                 alert_name=attempt.alert_name,
-                symptom_fingerprint=symptom_fingerprint[:100],
-                error=str(e),
-                error_type=type(e).__name__
+                category=category,
+                symptom_fingerprint=symptom_fingerprint,
+                root_cause=root_cause,
+                solution_commands=attempt.commands_executed,
+                risk_level=attempt.risk_level
             )
-            # Return None to indicate failure, caller should handle
-            return None
+            self.logger.info(
+                "pattern_created",
+                pattern_id=pattern_id,
+                alert_name=attempt.alert_name
+            )
+
+        # Invalidate cache
+        self._cache_timestamp = None
+
+        return pattern_id
 
     async def find_similar_patterns(
         self,
@@ -200,7 +132,9 @@ class LearningEngine:
         Find patterns similar to the incoming alert.
 
         Uses symptom fingerprinting and confidence scoring to match
-        alerts to known remediation patterns.
+        alerts to known remediation patterns. For alerts with 'system'
+        or 'remediation_host' labels, prioritizes patterns with matching
+        target_host.
 
         Args:
             alert_name: Name of the alert
@@ -216,10 +150,18 @@ class LearningEngine:
             alert_labels
         )
 
+        # Extract target system from labels (for BackupStale, etc.)
+        alert_target_system = (
+            alert_labels.get('system') or
+            alert_labels.get('remediation_host') or
+            None
+        )
+
         self.logger.info(
             "searching_patterns",
             alert_name=alert_name,
-            symptom_fingerprint=symptom_fingerprint[:100]
+            symptom_fingerprint=symptom_fingerprint[:100],
+            alert_target_system=alert_target_system
         )
 
         # Refresh cache if needed
@@ -240,17 +182,52 @@ class LearningEngine:
             if pattern['confidence_score'] < min_confidence:
                 continue
 
-            # Calculate similarity score (could be enhanced with ML)
+            # CRITICAL: Check target_host matching for system-specific patterns
+            pattern_target = pattern.get('target_host')
+            if alert_target_system and pattern_target:
+                # Both have target info - must match
+                if pattern_target.lower() != alert_target_system.lower():
+                    self.logger.debug(
+                        "pattern_target_mismatch",
+                        pattern_id=pattern['id'],
+                        pattern_target=pattern_target,
+                        alert_target=alert_target_system
+                    )
+                    continue
+            elif alert_target_system and not pattern_target:
+                # Alert has system info but pattern doesn't - skip generic patterns
+                # when we have specific ones
+                self.logger.debug(
+                    "skipping_generic_pattern",
+                    pattern_id=pattern['id'],
+                    reason="alert has system label but pattern has no target_host"
+                )
+                continue
+
+            # Calculate similarity score
             similarity = self._calculate_similarity(
                 symptom_fingerprint,
                 pattern['symptom_fingerprint']
             )
 
-            if similarity >= 0.7:  # 70% similarity threshold
+            # For patterns with matching target_host, boost similarity
+            target_match_boost = 0.0
+            if alert_target_system and pattern_target:
+                if pattern_target.lower() == alert_target_system.lower():
+                    target_match_boost = 0.1
+                    self.logger.debug(
+                        "target_host_match_boost",
+                        pattern_id=pattern['id'],
+                        target=pattern_target
+                    )
+
+            effective_similarity = min(1.0, similarity + target_match_boost)
+
+            if effective_similarity >= 0.7:  # 70% similarity threshold
                 matches.append({
                     **pattern,
-                    'similarity_score': similarity,
-                    'effective_confidence': pattern['confidence_score'] * similarity
+                    'similarity_score': effective_similarity,
+                    'effective_confidence': pattern['confidence_score'] * effective_similarity
                 })
 
         # Sort by effective confidence (pattern confidence * similarity)
@@ -260,7 +237,8 @@ class LearningEngine:
             "patterns_found",
             alert_name=alert_name,
             match_count=len(matches),
-            top_confidence=matches[0]['effective_confidence'] if matches else 0
+            top_confidence=matches[0]['effective_confidence'] if matches else 0,
+            top_pattern_id=matches[0]['id'] if matches else None
         )
 
         return matches
@@ -319,21 +297,16 @@ class LearningEngine:
         pattern_id: int,
         success: bool,
         execution_time: int
-    ) -> Optional[float]:
+    ):
         """
         Record the outcome of using a learned pattern.
 
         Updates pattern statistics using Bayesian confidence scoring.
 
-        HIGH-006 FIX: Now properly returns the new confidence value.
-
         Args:
             pattern_id: ID of the pattern used
             success: Whether remediation succeeded
             execution_time: Time taken in seconds
-
-        Returns:
-            New confidence score after update, or None on error
         """
         query = """
             UPDATE remediation_patterns
@@ -373,9 +346,6 @@ class LearningEngine:
         # Invalidate cache
         self._cache_timestamp = None
 
-        # HIGH-006 FIX: Return the new confidence value
-        return new_confidence
-
     def _build_symptom_fingerprint(
         self,
         alert_name: str,
@@ -387,10 +357,20 @@ class LearningEngine:
         This helps group similar alerts together even if they have
         different instances or minor label variations.
 
-        v3.2: Added 'system' label support for backup alerts (homeassistant, nexus, etc.)
+        IMPORTANT: For BackupStale alerts, the 'system' label indicates which
+        backup is stale (nexus, skynet, homeassistant, outpost) - this is
+        critical for pattern matching.
         """
-        # Key labels that indicate symptom type
-        key_labels = [
+        # Priority labels for fingerprinting (checked first)
+        # 'system' is critical for BackupStale alerts
+        priority_labels = [
+            'system',           # Which system's backup is stale
+            'remediation_host', # Where to run the fix
+            'category',         # Alert category (backup, container, etc)
+        ]
+
+        # Standard labels that indicate symptom type
+        standard_labels = [
             'alertname',
             'job',
             'severity',
@@ -398,29 +378,35 @@ class LearningEngine:
             'service',
             'host',
             'device',
-            'filesystem',
-            'system',  # v3.2: For backup alerts (homeassistant, nexus, etc.)
+            'filesystem'
         ]
 
         parts = [alert_name]
-        for label in key_labels:
+
+        # First, add priority labels (most important for pattern matching)
+        for label in priority_labels:
+            if label in labels:
+                value = labels[label]
+                parts.append(f'{label}:{value}')
+
+        # Then add standard labels
+        for label in standard_labels:
             if label in labels:
                 value = labels[label]
                 # Normalize instance-specific values
                 if label in ['instance', 'host']:
-                    # Extract host type (nexus, homeassistant, skynet, outpost)
-                    if 'nexus' in value.lower() or '192.168.0.11' in value:
+                    # Extract host type (nexus, homeassistant, etc)
+                    if 'nexus' in value.lower():
                         parts.append('host:nexus')
                     elif 'homeassistant' in value.lower() or '192.168.0.10' in value:
                         parts.append('host:homeassistant')
-                    elif 'skynet' in value.lower() or '192.168.0.13' in value:
-                        parts.append('host:skynet')
                     elif 'outpost' in value.lower() or '72.60.163.242' in value:
                         parts.append('host:outpost')
+                    elif 'skynet' in value.lower() or '192.168.0.13' in value:
+                        parts.append('host:skynet')
                     else:
                         parts.append(f'{label}:generic')
                 else:
-                    # Include label as-is (e.g., system:homeassistant for backup alerts)
                     parts.append(f'{label}:{value}')
 
         return '|'.join(parts)
@@ -488,22 +474,9 @@ class LearningEngine:
         symptom_fingerprint: str,
         root_cause: Optional[str],
         solution_commands: List[str],
-        risk_level: Optional[RiskLevel],
-        metadata: Optional[Dict[str, Any]] = None,
-        target_host: Optional[str] = None
+        risk_level: Optional[RiskLevel]
     ) -> int:
-        """Create a new remediation pattern.
-
-        v3.0: Now stores metadata including investigation chain.
-        v3.2: Added target_host for explicit host override.
-        MEDIUM-008 FIX: Uses INSERT ON CONFLICT to handle race conditions
-        where two processes try to create the same pattern simultaneously.
-        """
-        # Extract target_host from metadata if not explicitly provided
-        if target_host is None and metadata and 'actual_remediation_host' in metadata:
-            target_host = metadata['actual_remediation_host']
-
-        # MEDIUM-008 FIX: Use UPSERT to handle race conditions gracefully
+        """Create a new remediation pattern."""
         query = """
             INSERT INTO remediation_patterns (
                 alert_name,
@@ -511,16 +484,8 @@ class LearningEngine:
                 symptom_fingerprint,
                 root_cause,
                 solution_commands,
-                target_host,
-                risk_level,
-                metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (alert_name, symptom_fingerprint)
-            DO UPDATE SET
-                success_count = remediation_patterns.success_count + 1,
-                solution_commands = EXCLUDED.solution_commands,
-                metadata = COALESCE(remediation_patterns.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata::jsonb, '{}'::jsonb),
-                updated_at = NOW()
+                risk_level
+            ) VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id
         """
 
@@ -532,9 +497,7 @@ class LearningEngine:
                 symptom_fingerprint,
                 root_cause,
                 solution_commands,
-                target_host,
-                risk_level.value if risk_level else 'MEDIUM',
-                json.dumps(metadata) if metadata else None
+                risk_level.value if risk_level else 'MEDIUM'
             )
 
         return pattern_id
@@ -543,62 +506,42 @@ class LearningEngine:
         self,
         pattern_id: int,
         commands: List[str],
-        success: bool,
-        metadata: Optional[Dict[str, Any]] = None
+        success: bool
     ) -> int:
-        """Update an existing pattern with new outcome.
-
-        v3.0: Now merges metadata including investigation chain.
+        """Update an existing pattern with new outcome."""
+        query = """
+            UPDATE remediation_patterns
+            SET
+                success_count = success_count + CASE WHEN $3 THEN 1 ELSE 0 END,
+                failure_count = failure_count + CASE WHEN NOT $3 THEN 1 ELSE 0 END,
+                confidence_score = (
+                    success_count::float + CASE WHEN $3 THEN 1 ELSE 0 END
+                ) / (
+                    success_count + failure_count + 1
+                ),
+                solution_commands = $2,
+                usage_count = usage_count + 1,
+                last_used_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id
         """
-        # v3.0: Use JSONB merge if metadata provided
-        # HIGH-004 FIX: Use correct column names from schema (last_used_at, updated_at)
-        if metadata:
-            query = """
-                UPDATE remediation_patterns
-                SET
-                    success_count = success_count + CASE WHEN $3 THEN 1 ELSE 0 END,
-                    failure_count = failure_count + CASE WHEN NOT $3 THEN 1 ELSE 0 END,
-                    confidence_score = (
-                        success_count::float + CASE WHEN $3 THEN 1 ELSE 0 END
-                    ) / (
-                        success_count + failure_count + 1
-                    ),
-                    solution_commands = $2,
-                    metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
-                    last_used_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = $1
-                RETURNING id
-            """
-            async with self.db.pool.acquire() as conn:
-                return await conn.fetchval(query, pattern_id, commands, success, json.dumps(metadata))
-        else:
-            query = """
-                UPDATE remediation_patterns
-                SET
-                    success_count = success_count + CASE WHEN $3 THEN 1 ELSE 0 END,
-                    failure_count = failure_count + CASE WHEN NOT $3 THEN 1 ELSE 0 END,
-                    confidence_score = (
-                        success_count::float + CASE WHEN $3 THEN 1 ELSE 0 END
-                    ) / (
-                        success_count + failure_count + 1
-                    ),
-                    solution_commands = $2,
-                    last_used_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = $1
-                RETURNING id
-            """
-            async with self.db.pool.acquire() as conn:
-                return await conn.fetchval(query, pattern_id, commands, success)
+
+        async with self.db.pool.acquire() as conn:
+            return await conn.fetchval(query, pattern_id, commands, success)
 
     def _calculate_similarity(self, fingerprint1: str, fingerprint2: str) -> float:
         """
         Calculate similarity between two symptom fingerprints.
 
-        HIGH-008 FIX: Uses weighted Jaccard similarity where important labels
-        (alert name, host, container, service) contribute more to the score
-        than generic labels.
+        Uses a weighted approach:
+        1. If pattern fingerprint is subset of alert fingerprint, high match
+        2. Critical labels (system, container) must match for high confidence
+        3. Jaccard similarity for general matching
+
+        Args:
+            fingerprint1: Incoming alert fingerprint
+            fingerprint2: Stored pattern fingerprint
         """
         parts1 = set(fingerprint1.split('|'))
         parts2 = set(fingerprint2.split('|'))
@@ -606,53 +549,43 @@ class LearningEngine:
         if not parts1 or not parts2:
             return 0.0
 
-        # HIGH-008 FIX: Define weights for different label types
-        # Higher weights for more important distinguishing features
-        label_weights = {
-            'host': 3.0,        # Host is critical for routing
-            'container': 2.5,   # Container specificity
-            'service': 2.5,     # Service specificity
-            'system': 2.0,      # System (for backup alerts)
-            'job': 1.5,         # Job type
-            'severity': 1.0,    # Severity is common
-            'device': 2.0,      # Device specificity
-            'filesystem': 2.0,  # Filesystem specificity
-        }
-        default_weight = 1.0
-        alert_name_weight = 4.0  # Alert name is most important
-
-        def get_weight(part: str) -> float:
-            """Get weight for a fingerprint part."""
-            # First part (index 0) is always alert name
-            if ':' not in part:
-                return alert_name_weight
-            label = part.split(':')[0]
-            return label_weights.get(label, default_weight)
-
-        # Calculate weighted intersection and union
         intersection = parts1 & parts2
-        union = parts1 | parts2
+        intersection_count = len(intersection)
 
-        weighted_intersection = sum(get_weight(p) for p in intersection)
-        weighted_union = sum(get_weight(p) for p in union)
+        # Critical labels that MUST match for high confidence
+        critical_labels = ['system:', 'container:', 'remediation_host:']
 
-        return weighted_intersection / weighted_union if weighted_union > 0 else 0.0
+        # Check if all critical labels in pattern match
+        pattern_critical = [p for p in parts2 if any(p.startswith(c) for c in critical_labels)]
+        alert_critical = [p for p in parts1 if any(p.startswith(c) for c in critical_labels)]
 
-    async def _refresh_pattern_cache(self, force_refresh: bool = False):
-        """
-        Refresh the in-memory pattern cache if needed.
+        # If pattern has critical labels, they must all be in alert
+        if pattern_critical:
+            if not all(pc in parts1 for pc in pattern_critical):
+                # Critical label mismatch - low similarity
+                return 0.3
 
-        MEDIUM-002 FIX: Added force_refresh parameter to bypass TTL check.
-        MEDIUM-015 FIX: Uses timezone-aware datetime for accurate TTL checks.
+        # If pattern is a subset of alert (all pattern parts match), high score
+        if parts2.issubset(parts1):
+            # Pattern fully matches - scale by how specific the pattern is
+            return min(0.95, 0.7 + (len(parts2) / 10))
 
-        Args:
-            force_refresh: If True, bypasses TTL check and refreshes immediately
-        """
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
+        # Standard Jaccard similarity
+        union_count = len(parts1 | parts2)
+        jaccard = intersection_count / union_count if union_count > 0 else 0.0
 
-        if (force_refresh or
-            self._cache_timestamp is None or
+        # Boost score if critical labels match
+        critical_match_boost = 0.0
+        if pattern_critical and all(pc in parts1 for pc in pattern_critical):
+            critical_match_boost = 0.15
+
+        return min(1.0, jaccard + critical_match_boost)
+
+    async def _refresh_pattern_cache(self):
+        """Refresh the in-memory pattern cache if needed."""
+        now = datetime.utcnow()
+
+        if (self._cache_timestamp is None or
             now - self._cache_timestamp > self._cache_ttl):
 
             query = """
@@ -663,7 +596,6 @@ class LearningEngine:
                     symptom_fingerprint,
                     root_cause,
                     solution_commands,
-                    target_host,
                     success_count,
                     failure_count,
                     confidence_score,
@@ -671,7 +603,7 @@ class LearningEngine:
                     usage_count,
                     avg_execution_time,
                     last_used_at,
-                    metadata
+                    target_host
                 FROM remediation_patterns
                 WHERE enabled = TRUE
                 ORDER BY confidence_score DESC, usage_count DESC
@@ -718,3 +650,166 @@ class LearningEngine:
             stats['estimated_api_calls_saved'] = 0
 
         return stats
+
+    # =========================================================================
+    # Phase 1: Failure Pattern Learning
+    # =========================================================================
+
+    def _generate_failure_signature(
+        self,
+        alert_name: str,
+        commands: List[str]
+    ) -> str:
+        """Generate a unique signature for a failed remediation pattern."""
+        import hashlib
+        # Sort commands for consistent hashing
+        sorted_cmds = sorted(commands) if commands else []
+        content = f"{alert_name}|{'|'.join(sorted_cmds)}"
+        return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+    async def record_failure_pattern(
+        self,
+        alert_name: str,
+        alert_instance: str,
+        commands_attempted: List[str],
+        failure_reason: str,
+        symptom_fingerprint: Optional[str] = None
+    ) -> None:
+        """
+        Record a failed remediation pattern to avoid in future.
+
+        This helps Jarvis learn what NOT to do.
+
+        Args:
+            alert_name: Name of the alert
+            alert_instance: Instance that failed
+            commands_attempted: Commands that were tried
+            failure_reason: Why the remediation failed
+            symptom_fingerprint: Optional symptom fingerprint
+        """
+        pattern_signature = self._generate_failure_signature(alert_name, commands_attempted)
+
+        query = """
+            INSERT INTO remediation_failures (
+                alert_name,
+                alert_instance,
+                pattern_signature,
+                symptom_fingerprint,
+                commands_attempted,
+                failure_reason,
+                failure_count,
+                last_failed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, 1, NOW())
+            ON CONFLICT (pattern_signature) DO UPDATE SET
+                failure_count = remediation_failures.failure_count + 1,
+                last_failed_at = NOW(),
+                failure_reason = EXCLUDED.failure_reason
+        """
+
+        try:
+            async with self.db.pool.acquire() as conn:
+                await conn.execute(
+                    query,
+                    alert_name,
+                    alert_instance,
+                    pattern_signature,
+                    symptom_fingerprint,
+                    commands_attempted,
+                    failure_reason
+                )
+
+            self.logger.info(
+                "failure_pattern_recorded",
+                alert_name=alert_name,
+                signature=pattern_signature[:16],
+                commands_count=len(commands_attempted)
+            )
+        except Exception as e:
+            self.logger.error(
+                "failure_pattern_record_failed",
+                alert_name=alert_name,
+                error=str(e)
+            )
+
+    async def get_failed_patterns(
+        self,
+        alert_name: str,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Get patterns that have failed for this alert type.
+
+        Args:
+            alert_name: Alert name to look up
+            limit: Maximum patterns to return
+
+        Returns:
+            List of failed pattern records
+        """
+        query = """
+            SELECT
+                pattern_signature,
+                commands_attempted,
+                failure_reason,
+                failure_count,
+                last_failed_at
+            FROM remediation_failures
+            WHERE alert_name = $1
+            ORDER BY failure_count DESC, last_failed_at DESC
+            LIMIT $2
+        """
+
+        async with self.db.pool.acquire() as conn:
+            rows = await conn.fetch(query, alert_name, limit)
+
+        return [dict(row) for row in rows]
+
+    async def should_avoid_commands(
+        self,
+        alert_name: str,
+        commands: List[str],
+        min_failures: int = 2
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a set of commands should be avoided for an alert.
+
+        Args:
+            alert_name: Alert name
+            commands: Commands to check
+            min_failures: Minimum failure count to trigger avoidance
+
+        Returns:
+            Tuple of (should_avoid, reason)
+        """
+        signature = self._generate_failure_signature(alert_name, commands)
+
+        query = """
+            SELECT failure_count, failure_reason, last_failed_at
+            FROM remediation_failures
+            WHERE pattern_signature = $1
+              AND failure_count >= $2
+        """
+
+        async with self.db.pool.acquire() as conn:
+            row = await conn.fetchrow(query, signature, min_failures)
+
+        if row:
+            return True, f"Pattern failed {row['failure_count']} times: {row['failure_reason']}"
+
+        return False, None
+
+    async def get_failure_stats(self) -> Dict[str, Any]:
+        """Get failure pattern statistics."""
+        query = """
+            SELECT
+                COUNT(*) as total_failure_patterns,
+                SUM(failure_count) as total_failures_recorded,
+                COUNT(*) FILTER (WHERE failure_count >= 3) as chronic_failures,
+                MAX(last_failed_at) as most_recent_failure
+            FROM remediation_failures
+        """
+
+        async with self.db.pool.acquire() as conn:
+            row = await conn.fetchrow(query)
+
+        return dict(row) if row else {}

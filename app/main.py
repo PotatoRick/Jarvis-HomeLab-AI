@@ -31,6 +31,13 @@ from .alert_suppressor import AlertSuppressor
 from .alert_queue import AlertQueue
 from .learning_engine import LearningEngine
 from .external_service_monitor import ExternalServiceMonitor
+from .prometheus_client import prometheus_client
+from .alert_correlator import AlertCorrelator, init_correlator, alert_correlator
+from .proactive_monitor import ProactiveMonitor, init_proactive_monitor, proactive_monitor
+from .rollback_manager import RollbackManager, init_rollback_manager, rollback_manager
+from .n8n_client import init_n8n_client
+from .runbook_manager import init_runbook_manager, get_runbook_manager
+from . import metrics
 from .utils import (
     determine_target_host,
     extract_service_name,
@@ -42,12 +49,15 @@ from .utils import (
     get_confidence_level,       # v3.0: Confidence level helpers
 )
 
-# Initialize host monitor, alert suppressor, queue, learning engine, and external service monitor (will be set up in lifespan)
+# Initialize components (will be set up in lifespan)
 host_monitor = None
 alert_suppressor = None
 alert_queue = None
 learning_engine = None
 external_service_monitor = None
+correlator = None
+proactive_mon = None  # Phase 3: Proactive monitoring
+rollback_mgr = None   # Phase 3: Rollback capability
 
 # Configure structured logging
 structlog.configure(
@@ -117,7 +127,7 @@ async def log_attempt_with_fallback(attempt):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
-    global host_monitor, alert_suppressor, alert_queue, learning_engine, external_service_monitor
+    global host_monitor, alert_suppressor, alert_queue, learning_engine, external_service_monitor, correlator, proactive_mon, rollback_mgr
 
     logger.info(
         "application_starting",
@@ -149,6 +159,23 @@ async def lifespan(app: FastAPI):
     learning_engine = LearningEngine(db)
     logger.info("learning_engine_initialized")
 
+    # Initialize alert correlator for root cause analysis (Phase 2)
+    correlator = init_correlator(db)
+    logger.info("alert_correlator_initialized")
+
+    # Phase 3: Initialize n8n client for workflow orchestration
+    init_n8n_client()
+
+    # Phase 3: Initialize rollback manager for state snapshots
+    rollback_mgr = init_rollback_manager(ssh_executor=ssh_executor)
+    logger.info("rollback_manager_initialized")
+
+    # Phase 3: Initialize and start proactive monitoring
+    proactive_mon = init_proactive_monitor(ssh_executor=ssh_executor)
+    if proactive_mon:
+        await proactive_mon.start()
+        logger.info("proactive_monitor_started")
+
     # CRITICAL-003 FIX: Validate SSH keys on startup
     ssh_key_errors = ssh_executor.get_key_validation_errors()
     if ssh_key_errors:
@@ -158,12 +185,29 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("ssh_keys_validated", message="All SSH keys validated successfully")
 
+    # Phase 4: Initialize runbook manager
+    runbook_dir = "/app/runbooks"  # Default Docker path
+    import os
+    if not os.path.exists(runbook_dir):
+        # Fallback for local development
+        runbook_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runbooks")
+    init_runbook_manager(runbook_dir=runbook_dir)
+    logger.info("runbook_manager_initialized", runbook_dir=runbook_dir)
+
+    # Phase 4: Initialize Prometheus metrics
+    metrics.init_metrics(settings.app_version)
+    metrics.set_database_status(True)
+    logger.info("prometheus_metrics_initialized")
+
     yield
 
     # Cleanup
     await host_monitor.stop()
     await alert_queue.stop()
     await external_service_monitor.stop()
+    # Phase 3: Stop proactive monitoring
+    if proactive_mon:
+        await proactive_mon.stop()
     # HIGH-011 FIX: Close SSH connections on shutdown to prevent resource leaks
     await ssh_executor.close_all_connections()
     await db.disconnect()
@@ -209,6 +253,96 @@ async def get_version():
         "name": settings.app_name,
         "version": settings.app_version,
         "python_version": "3.11"
+    }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """
+    Prometheus metrics endpoint for self-monitoring.
+
+    Phase 4: Exposes Jarvis performance metrics for Prometheus scraping.
+    Add to Prometheus scrape config:
+        - job_name: 'jarvis'
+          static_configs:
+            - targets: ['192.168.0.13:8000']
+    """
+    return metrics.get_metrics_response()
+
+
+@app.get("/runbooks")
+async def list_runbooks():
+    """
+    List all available runbooks.
+
+    Phase 4: Returns runbook inventory for debugging and visibility.
+    """
+    runbook_mgr = get_runbook_manager()
+    if not runbook_mgr:
+        return {
+            "status": "not_initialized",
+            "runbooks": []
+        }
+
+    return {
+        "status": "ok",
+        "count": len(runbook_mgr.runbooks),
+        "runbooks": runbook_mgr.list_runbooks()
+    }
+
+
+@app.get("/runbooks/{alert_name}")
+async def get_runbook(alert_name: str):
+    """
+    Get runbook for a specific alert type.
+
+    Phase 4: Returns structured runbook content for an alert.
+    """
+    runbook_mgr = get_runbook_manager()
+    if not runbook_mgr:
+        raise HTTPException(
+            status_code=503,
+            detail="Runbook manager not initialized"
+        )
+
+    runbook = runbook_mgr.get_runbook(alert_name)
+    if not runbook:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No runbook found for alert: {alert_name}"
+        )
+
+    return {
+        "alert_name": runbook.alert_name,
+        "title": runbook.title,
+        "overview": runbook.overview,
+        "investigation_steps": runbook.investigation_steps,
+        "common_causes": runbook.common_causes,
+        "remediation_steps": runbook.remediation_steps,
+        "commands": runbook.commands,
+        "risk_level": runbook.risk_level,
+        "estimated_duration": runbook.estimated_duration
+    }
+
+
+@app.post("/runbooks/reload")
+async def reload_runbooks():
+    """
+    Reload runbooks from disk.
+
+    Phase 4: Allows refreshing runbooks without restarting Jarvis.
+    """
+    runbook_mgr = get_runbook_manager()
+    if not runbook_mgr:
+        raise HTTPException(
+            status_code=503,
+            detail="Runbook manager not initialized"
+        )
+
+    count = runbook_mgr.reload()
+    return {
+        "status": "reloaded",
+        "count": count
     }
 
 
@@ -962,6 +1096,11 @@ async def process_alert(alert):
     """
     alert_name = alert.labels.alertname
     alert_fingerprint = alert.fingerprint
+    severity = getattr(alert.labels, 'severity', 'warning')
+
+    # Phase 4: Record alert received metric
+    metrics.record_alert_received(alert_name, severity)
+    metrics.update_active_remediations(1)  # Increment active count
 
     # HIGH-010 FIX: Validate alert fingerprint exists and is non-empty
     # Empty fingerprints could bypass deduplication entirely
@@ -1035,6 +1174,9 @@ async def process_alert(alert):
             last_processed=last_processed.isoformat() if last_processed else None,
             cooldown_seconds=settings.fingerprint_cooldown_seconds
         )
+        # Phase 4: Record skipped metric (deduplicated)
+        metrics.record_remediation_attempt(alert_name, 'skipped')
+        metrics.update_active_remediations(-1)
         return {
             "alert": alert_name,
             "status": "deduplicated",
@@ -1065,6 +1207,10 @@ async def process_alert(alert):
 
         # Escalate
         await escalate_alert(alert, attempt_count)
+
+        # Phase 4: Record escalation metric
+        metrics.record_remediation_attempt(alert_name, 'escalated')
+        metrics.update_active_remediations(-1)
 
         return {
             "alert": alert_name,
@@ -1105,6 +1251,10 @@ async def process_alert(alert):
             reason=maintenance_window['reason']
         )
 
+        # Phase 4: Record suppressed metric
+        metrics.record_remediation_attempt(alert_name, 'suppressed')
+        metrics.update_active_remediations(-1)
+
         return {
             "alert": alert_name,
             "status": "suppressed",
@@ -1130,6 +1280,10 @@ async def process_alert(alert):
                 reason=suppress_reason
             )
 
+            # Phase 4: Record suppressed metric
+            metrics.record_remediation_attempt(alert_name, 'suppressed')
+            metrics.update_active_remediations(-1)
+
             return {
                 "alert": alert_name,
                 "status": "suppressed",
@@ -1139,6 +1293,55 @@ async def process_alert(alert):
 
         # Register root cause alerts
         alert_suppressor.register_root_cause(alert_name)
+
+    # Phase 2: Check for alert correlation (root cause analysis)
+    correlation_context = ""
+    if correlator:
+        try:
+            # Build alert dict for correlator
+            alert_dict = {
+                "labels": dict(alert.labels),
+                "annotations": dict(alert.annotations) if hasattr(alert, 'annotations') else {},
+                "startsAt": alert.startsAt.isoformat() if hasattr(alert, 'startsAt') and alert.startsAt else None
+            }
+
+            # Check if this alert correlates with others
+            incident = await correlator.correlate_alert(alert_dict)
+
+            if incident:
+                logger.info(
+                    "alert_correlated",
+                    alert_name=alert_name,
+                    root_cause=incident.root_cause_alert,
+                    correlation_type=incident.correlation_type,
+                    related_alerts=incident.related_alerts
+                )
+
+                # Check if we should skip this alert (not the root cause)
+                if correlator.should_skip_alert(alert_name, incident):
+                    logger.info(
+                        "alert_skipped_not_root_cause",
+                        alert_name=alert_name,
+                        root_cause=incident.root_cause_alert,
+                        reason="Root cause is being handled"
+                    )
+                    return {
+                        "alert": alert_name,
+                        "status": "skipped",
+                        "reason": f"Correlated with {incident.root_cause_alert} (root cause)",
+                        "correlation_type": incident.correlation_type
+                    }
+
+                # Get correlation context to pass to Claude
+                correlation_context = await correlator.get_correlation_context(alert_dict)
+
+        except Exception as e:
+            logger.warning(
+                "correlation_check_failed",
+                alert_name=alert_name,
+                error=str(e)
+            )
+            # Continue without correlation - non-critical feature
 
     # Check if we have a learned pattern for this alert
     use_pattern = False
@@ -1209,6 +1412,10 @@ Success Rate: {learned_pattern['success_count']}/{learned_pattern['success_count
 
 You may use this pattern if it applies, or suggest a different approach if needed.
 """
+
+    # Phase 2: Add correlation context if available
+    if correlation_context:
+        system_context += correlation_context
 
     start_time = datetime.utcnow()
 
@@ -1449,9 +1656,96 @@ You may use this pattern if it applies, or suggest a different approach if neede
 
             # Notify (only if actionable commands were executed)
             if execution_result.success:
+                # Phase 1: Verify remediation via Prometheus if enabled
+                verified_success = True
+                verification_message = "Verification skipped"
+
+                if settings.verification_enabled:
+                    try:
+                        # Build labels dict for matching
+                        verification_labels = {}
+                        if hasattr(alert.labels, 'system'):
+                            verification_labels['system'] = alert.labels.system
+                        if hasattr(alert.labels, 'container'):
+                            verification_labels['container'] = alert.labels.container
+
+                        verified_success, verification_message = await prometheus_client.verify_remediation(
+                            alert_name=alert_name,
+                            instance=alert_instance if ':' not in (alert_instance or '') else None,
+                            labels=verification_labels if verification_labels else None,
+                            max_wait_seconds=settings.verification_max_wait_seconds,
+                            poll_interval=settings.verification_poll_interval,
+                            initial_delay=settings.verification_initial_delay
+                        )
+
+                        logger.info(
+                            "remediation_verification_result",
+                            alert_name=alert_name,
+                            verified=verified_success,
+                            message=verification_message
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "verification_failed_fallback_to_exit_code",
+                            alert_name=alert_name,
+                            error=str(e)
+                        )
+                        # Fallback to exit code success if verification fails
+                        verified_success = True
+                        verification_message = f"Verification error ({str(e)}), using exit code"
+
+                # Update attempt success based on verification
+                if not verified_success:
+                    attempt.success = False
+                    attempt.error_message = f"Commands succeeded but alert not resolved: {verification_message}"
+                    await log_attempt_with_fallback(attempt)
+
+                    await discord_notifier.notify_failure(
+                        attempt,
+                        execution_time=duration,
+                        max_attempts=settings.max_attempts_per_alert
+                    )
+
+                    # Record failure for learning
+                    if learning_engine and pattern_used_id:
+                        try:
+                            await learning_engine.record_outcome(
+                                pattern_id=pattern_used_id,
+                                success=False,
+                                execution_time=duration
+                            )
+                        except Exception as e:
+                            logger.warning("pattern_outcome_recording_failed", error=str(e))
+
+                    # Phase 1: Record failure pattern to avoid repeating
+                    if learning_engine and actionable_commands:
+                        try:
+                            await learning_engine.record_failure_pattern(
+                                alert_name=alert_name,
+                                alert_instance=alert_instance,
+                                commands_attempted=actionable_commands,
+                                failure_reason=verification_message
+                            )
+                        except Exception as e:
+                            logger.warning("failure_pattern_recording_failed", error=str(e))
+
+                    # Check if we should escalate
+                    if attempt_count + 1 >= settings.max_attempts_per_alert:
+                        await escalate_alert(alert, attempt_count + 1)
+
+                    return {
+                        "alert": alert_name,
+                        "status": "failed",
+                        "reason": "verification_failed",
+                        "verification_message": verification_message,
+                        "attempt": attempt_count + 1,
+                        "pattern_used": pattern_used_id is not None
+                    }
+
+                # Verified success - notify and learn
                 await discord_notifier.notify_success(attempt, duration, settings.max_attempts_per_alert)
 
-                # Extract pattern for learning (only from successful remediations)
+                # Extract pattern for learning (only from VERIFIED successful remediations)
                 if learning_engine and not pattern_used_id:
                     # This was a Claude-generated solution that succeeded
                     try:
@@ -1463,7 +1757,8 @@ You may use this pattern if it applies, or suggest a different approach if neede
                             logger.info(
                                 "pattern_learned",
                                 pattern_id=pattern_id,
-                                alert_name=alert_name
+                                alert_name=alert_name,
+                                verified=verified_success
                             )
                     except Exception as e:
                         logger.warning(
@@ -1483,7 +1778,8 @@ You may use this pattern if it applies, or suggest a different approach if neede
                         logger.info(
                             "pattern_outcome_recorded",
                             pattern_id=pattern_used_id,
-                            success=True
+                            success=True,
+                            verified=verified_success
                         )
                     except Exception as e:
                         logger.warning(
@@ -1492,10 +1788,18 @@ You may use this pattern if it applies, or suggest a different approach if neede
                             pattern_id=pattern_used_id
                         )
 
+                # Phase 4: Record success metrics
+                metrics.record_remediation_attempt(alert_name, 'success', duration)
+                metrics.update_active_remediations(-1)
+                if pattern_used_id:
+                    metrics.record_pattern_match(True)
+
                 return {
                     "alert": alert_name,
                     "status": "remediated",
                     "duration": duration,
+                    "verified": verified_success,
+                    "verification_message": verification_message,
                     "pattern_used": pattern_used_id is not None
                 }
             else:
@@ -1529,6 +1833,10 @@ You may use this pattern if it applies, or suggest a different approach if neede
                 if attempt_count + 1 >= settings.max_attempts_per_alert:
                     await escalate_alert(alert, attempt_count + 1)
 
+                # Phase 4: Record failure metrics
+                metrics.record_remediation_attempt(alert_name, 'failure', duration)
+                metrics.update_active_remediations(-1)
+
                 return {
                     "alert": alert_name,
                     "status": "failed",
@@ -1538,6 +1846,7 @@ You may use this pattern if it applies, or suggest a different approach if neede
                 }
         else:
             # Only diagnostic commands executed - don't count as attempt
+            metrics.update_active_remediations(-1)
             logger.info(
                 "diagnostic_only_no_attempt_logged",
                 alert_name=alert_name,

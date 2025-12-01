@@ -6,28 +6,7 @@ Jarvis monitors Prometheus alerts and automatically remediates common service fa
 
 ---
 
-## Quick Start (Public Distribution)
-
-**Jarvis is publicly available!** No registry login required.
-
-```bash
-# 1. Create directory and download config
-mkdir -p ~/jarvis && cd ~/jarvis
-curl -O https://jarvis.theburrow.casa/static/docker-compose.yml
-
-# 2. Create .env file (see https://jarvis.theburrow.casa/deploy)
-# 3. Copy your SSH key
-cp ~/.ssh/id_ed25519 ./ssh_key && chmod 600 ./ssh_key
-
-# 4. Start Jarvis
-docker compose up -d
-```
-
-**Full documentation:** https://jarvis.theburrow.casa/deploy
-
----
-
-## Quick Start (Development)
+## Quick Start
 
 ### Prerequisites
 - PostgreSQL database (for attempt tracking)
@@ -93,16 +72,13 @@ route:
 ### Core Capabilities
 - **Autonomous Remediation**: Analyzes alerts and executes corrective commands automatically
 - **Multi-Host Support**: SSH into Nexus, Home Assistant, or Outpost to fix issues
-- **Cross-System Alert Correlation**: Detects VPN/network alerts that require checking multiple hosts
 - **Smart Command Validation**: Blacklist-only safety checks prevent destructive actions
-- **Intelligent Risk Assessment**: Allows safe restarts even when AI suggests HIGH risk
 - **Attempt Tracking**: 2-hour rolling window with configurable max attempts
 - **Container-Specific Tracking**: Separate attempt counters for each container
 - **Diagnostic Command Filtering**: Only state-changing commands count toward attempts
 - **Self-Protection**: Cannot stop/restart itself or critical dependencies
 - **SSH Connection Pooling**: Reuses connections for 96% faster execution
 - **Discord Notifications**: Real-time alerts for successes, failures, and escalations
-- **Complete Audit Trail**: All attempts (including no-action and escalations) logged to database
 
 ### What Jarvis Can Fix
 
@@ -367,44 +343,7 @@ docker logs jarvis | grep -E "(ssh_connection_established|reusing_ssh_connection
 
 For production deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md)
 
-### For Users (Public Registry)
-
-Jarvis is distributed via **registry.theburrow.casa** - no login required to pull!
-
-```bash
-# Pull latest image (no credentials needed)
-docker pull registry.theburrow.casa/jarvis:latest
-
-# Or use the docker-compose template
-curl -O https://jarvis.theburrow.casa/static/docker-compose.yml
-docker compose up -d
-```
-
-Full deployment guide: https://jarvis.theburrow.casa/deploy
-
-### For Maintainers (Releasing Updates)
-
-```bash
-# Release new version (from Skynet)
-cd /home/t1/homelab/projects/ai-remediation-service
-./scripts/release.sh 3.0.2    # Specify version
-./scripts/release.sh          # Or use VERSION file
-
-# This will:
-# 1. Build the Docker image
-# 2. Push to registry.theburrow.casa (auth handled by script)
-# 3. Tag as both :version and :latest
-# 4. Restart local Jarvis
-# 5. Sync changelog to Jarvis Hub
-```
-
-**Registry URLs:**
-- **Dashboard:** https://jarvis.theburrow.casa
-- **Registry:** https://registry.theburrow.casa
-- **Image:** `registry.theburrow.casa/jarvis:latest`
-
-### Development (Local Build)
-
+**Quick deployment on Outpost (Skynet):**
 ```bash
 cd /home/t1/homelab/projects/ai-remediation-service
 git pull origin main
@@ -417,14 +356,6 @@ docker logs -f jarvis
 ---
 
 ## Changelog
-
-### November 25, 2025 - Cross-System & Risk Level Improvements
-- **Cross-System Alert Correlation**: VPN/WireGuard alerts now automatically check BOTH Nexus and Outpost endpoints
-- **Sudo Prefix Fix**: All systemctl commands now properly include `sudo` prefix for remote execution
-- **Improved Risk Level Handling**: Safe commands (restarts, status checks) execute even when AI marks as HIGH risk
-- **Complete Database Logging**: Escalations and no-action attempts now logged for full audit trail
-- **Enhanced System Prompt**: Claude receives comprehensive infrastructure overview and command rules
-- **New Utility Functions**: `is_cross_system_alert()` and `get_related_hosts()` for multi-host analysis
 
 ### November 11, 2025 - Bug Fixes
 - **Discord Username Fix**: Changed notification username from "Homelab SRE" to "Jarvis" for consistent branding

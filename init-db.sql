@@ -48,14 +48,21 @@ CREATE TABLE IF NOT EXISTS remediation_patterns (
     symptom_fingerprint TEXT,             -- Normalized description of the problem
     root_cause TEXT,                      -- What actually caused the issue
     solution_commands TEXT[],             -- Commands that successfully resolved it
+    target_host VARCHAR(50),              -- Override: which host to execute on (nexus, homeassistant, outpost, skynet)
     success_count INT DEFAULT 1,          -- How many times this pattern worked
     failure_count INT DEFAULT 0,          -- How many times it failed
     avg_resolution_time INT,              -- Average seconds to resolve
     confidence_score FLOAT DEFAULT 0.80,  -- success/(success+failure)
+    risk_level VARCHAR(10) DEFAULT 'low', -- Risk level: low, medium, high
+    usage_count INT DEFAULT 0,            -- How many times pattern was used
+    avg_execution_time FLOAT,             -- Average execution time in seconds
     first_seen TIMESTAMP DEFAULT NOW(),
-    last_used TIMESTAMP,
+    last_used_at TIMESTAMP,
     last_updated TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP,
     created_by VARCHAR(50) DEFAULT 'learned',  -- 'claude', 'learned', 'seed'
+    enabled BOOLEAN DEFAULT true,         -- Allow disabling patterns without deleting
     metadata JSONB,                       -- Additional context (host, service type, etc.)
     UNIQUE(alert_name, symptom_fingerprint)
 );
@@ -63,7 +70,7 @@ CREATE TABLE IF NOT EXISTS remediation_patterns (
 CREATE INDEX IF NOT EXISTS idx_patterns_alert_name ON remediation_patterns(alert_name);
 CREATE INDEX IF NOT EXISTS idx_patterns_confidence ON remediation_patterns(confidence_score DESC);
 CREATE INDEX IF NOT EXISTS idx_patterns_category ON remediation_patterns(alert_category);
-CREATE INDEX IF NOT EXISTS idx_patterns_last_used ON remediation_patterns(last_used DESC);
+CREATE INDEX IF NOT EXISTS idx_patterns_last_used ON remediation_patterns(last_used_at DESC);
 
 
 -- Track alert fingerprints for pattern matching and similarity detection
@@ -134,6 +141,68 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
 
 CREATE INDEX IF NOT EXISTS idx_maintenance_active ON maintenance_windows(is_active, host) WHERE is_active = true;
 CREATE INDEX IF NOT EXISTS idx_maintenance_started ON maintenance_windows(started_at DESC);
+
+
+-- ============================================================================
+-- NEW SCHEMA: Escalation Cooldowns (v3.1.0)
+-- ============================================================================
+
+-- Track escalation cooldowns to prevent Discord spam
+-- When an alert is escalated, we record the time. If the same alert fires again
+-- within the cooldown period (default 4 hours), we skip re-escalating.
+-- When an alert resolves, we clear its cooldown so new incidents get escalated.
+CREATE TABLE IF NOT EXISTS escalation_cooldowns (
+    id SERIAL PRIMARY KEY,
+    alert_name VARCHAR(255) NOT NULL,
+    alert_instance VARCHAR(255) NOT NULL,
+    escalated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(alert_name, alert_instance)
+);
+
+CREATE INDEX IF NOT EXISTS idx_escalation_cooldowns_alert ON escalation_cooldowns(alert_name, alert_instance);
+CREATE INDEX IF NOT EXISTS idx_escalation_cooldowns_time ON escalation_cooldowns(escalated_at DESC);
+
+
+-- ============================================================================
+-- NEW SCHEMA: Alert Fingerprint Cache (v3.1.0)
+-- ============================================================================
+
+-- In-memory cache is preferred, but this table provides persistence across restarts
+-- and allows multiple Jarvis instances to share deduplication state
+CREATE TABLE IF NOT EXISTS alert_processing_cache (
+    id SERIAL PRIMARY KEY,
+    fingerprint VARCHAR(64) NOT NULL UNIQUE,
+    alert_name VARCHAR(255),
+    alert_instance VARCHAR(255),
+    processed_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_cache_fingerprint ON alert_processing_cache(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_alert_cache_time ON alert_processing_cache(processed_at DESC);
+
+
+-- ============================================================================
+-- NEW SCHEMA: Remediation Failures (Phase 1 - Self-Sufficiency Roadmap)
+-- ============================================================================
+
+-- Track failed remediation patterns to avoid repeating mistakes
+-- This helps Jarvis learn what NOT to do
+CREATE TABLE IF NOT EXISTS remediation_failures (
+    id SERIAL PRIMARY KEY,
+    alert_name VARCHAR(255) NOT NULL,
+    alert_instance VARCHAR(255),
+    pattern_signature VARCHAR(64) NOT NULL UNIQUE,
+    symptom_fingerprint TEXT,
+    commands_attempted TEXT[],
+    failure_reason TEXT,
+    failure_count INTEGER DEFAULT 1,
+    last_failed_at TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_failures_alert ON remediation_failures(alert_name);
+CREATE INDEX IF NOT EXISTS idx_failures_signature ON remediation_failures(pattern_signature);
+CREATE INDEX IF NOT EXISTS idx_failures_time ON remediation_failures(last_failed_at DESC);
 
 
 -- ============================================================================
@@ -222,16 +291,32 @@ INSERT INTO remediation_patterns (
      ARRAY['docker restart {container}'],
      0.70, 'seed', '{"typical_resolution_time": 8}'::jsonb),
 
-    -- Backup patterns (Added: v2.1.0)
-    ('BackupStale', 'backup', 'backup_status==0',
-     'B2 cloud backup upload failed or backup script did not run',
-     ARRAY['echo "Checking rclone B2 connectivity..."', 'rclone lsd b2: --fast-list 2>&1 | head -5', 'echo "Checking recent backup logs..."', 'tail -30 /home/t1/backups/backup_skynet.log 2>/dev/null || tail -30 /home/jordan/docker/backups/backup.log 2>/dev/null'],
-     0.60, 'seed', '{"notify_only": true, "description": "Diagnoses B2 backup failures"}'::jsonb),
+    -- Backup patterns (Updated: v3.2.0 with target_host)
+    -- IMPORTANT: Backup metrics are scraped from Nexus, but scripts run on Skynet!
+    ('BackupStale', 'backup', 'backup_status==0|system:homeassistant',
+     'Home Assistant backup script did not run or failed to upload to B2. Scripts are on Skynet, not Nexus.',
+     ARRAY['/home/t1/homelab/scripts/backup/backup_homeassistant_notify.sh'],
+     0.90, 'seed', '{"target_host": "skynet", "description": "Runs HA backup script on Skynet. Alert comes from Nexus metrics but fix runs on Skynet."}'::jsonb),
+
+    ('BackupStale', 'backup', 'backup_status==0|system:nexus',
+     'Nexus backup script did not run or failed',
+     ARRAY['cd /home/jordan/docker/home-stack && ./backup.sh'],
+     0.85, 'seed', '{"target_host": "nexus", "description": "Runs Nexus backup script locally"}'::jsonb),
+
+    ('BackupStale', 'backup', 'backup_status==0|system:skynet',
+     'Skynet backup script did not run or failed',
+     ARRAY['/home/t1/homelab/scripts/backup/backup_skynet.sh'],
+     0.85, 'seed', '{"target_host": "skynet", "description": "Runs Skynet backup script locally"}'::jsonb),
+
+    ('BackupStale', 'backup', 'backup_status==0|system:outpost',
+     'Outpost backup script did not run or failed',
+     ARRAY['cd /opt/burrow && ./backup.sh'],
+     0.85, 'seed', '{"target_host": "outpost", "description": "Runs Outpost backup script locally"}'::jsonb),
 
     ('BackupHealthCheckStale', 'monitoring', 'backup_check_timestamp_stale',
-     'Backup health check cron job is not running',
-     ARRAY['crontab -l | grep -i backup || echo "No backup cron jobs found"', 'ls -la /home/t1/homelab/scripts/backup/check_b2_backups.sh 2>/dev/null || echo "Script not found"'],
-     0.70, 'seed', '{"description": "Diagnoses backup monitoring issues"}'::jsonb)
+     'Backup health check cron job is not running on Skynet',
+     ARRAY['/home/t1/homelab/scripts/backup/check_b2_backups.sh'],
+     0.85, 'seed', '{"target_host": "skynet", "description": "Runs backup check on Skynet and pushes metrics to Nexus"}'::jsonb)
 
 ON CONFLICT (alert_name, symptom_fingerprint) DO NOTHING;
 
@@ -300,6 +385,7 @@ $$ LANGUAGE plpgsql;
 -- ============================================================================
 
 -- View for high-confidence patterns
+-- HIGH-004 FIX: Use correct column name (last_used_at instead of last_used)
 CREATE OR REPLACE VIEW high_confidence_patterns AS
 SELECT
     id,
@@ -310,7 +396,7 @@ SELECT
     success_count,
     failure_count,
     avg_resolution_time,
-    last_used
+    last_used_at
 FROM remediation_patterns
 WHERE confidence_score >= 0.75
 ORDER BY confidence_score DESC, success_count DESC;
@@ -326,6 +412,75 @@ SELECT
     SUM(success_count) as total_successes,
     SUM(failure_count) as total_failures
 FROM remediation_patterns;
+
+-- ============================================================================
+-- NEW SCHEMA: Proactive Monitoring (Phase 3 - Self-Sufficiency Roadmap)
+-- ============================================================================
+
+-- Track proactive monitoring checks and findings
+CREATE TABLE IF NOT EXISTS proactive_checks (
+    id SERIAL PRIMARY KEY,
+    check_type VARCHAR(50) NOT NULL,          -- 'disk_fill_rate', 'certificate_expiry', etc.
+    target VARCHAR(255) NOT NULL,              -- Host, container, or service checked
+    finding TEXT NOT NULL,                     -- What was found
+    action_taken TEXT,                         -- What action was taken (if any)
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_proactive_checks_type ON proactive_checks(check_type);
+CREATE INDEX IF NOT EXISTS idx_proactive_checks_target ON proactive_checks(target);
+CREATE INDEX IF NOT EXISTS idx_proactive_checks_time ON proactive_checks(created_at DESC);
+
+
+-- ============================================================================
+-- NEW SCHEMA: State Snapshots for Rollback (Phase 3 - Self-Sufficiency Roadmap)
+-- ============================================================================
+
+-- Store state snapshots before remediation for potential rollback
+CREATE TABLE IF NOT EXISTS state_snapshots (
+    id SERIAL PRIMARY KEY,
+    snapshot_id VARCHAR(64) NOT NULL UNIQUE,
+    host VARCHAR(50) NOT NULL,                -- 'nexus', 'homeassistant', 'outpost', 'skynet'
+    target_type VARCHAR(20) NOT NULL,         -- 'container', 'service', 'config', 'database'
+    target_name VARCHAR(255) NOT NULL,        -- Container name, service name, etc.
+    state_data TEXT,                          -- JSON blob of captured state
+    alert_context TEXT,                       -- Alert that triggered snapshot
+    rolled_back_at TIMESTAMP,                 -- When rollback was performed (NULL if not rolled back)
+    rollback_reason TEXT,                     -- Why rollback was performed
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_id ON state_snapshots(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_snapshots_host ON state_snapshots(host);
+CREATE INDEX IF NOT EXISTS idx_snapshots_target ON state_snapshots(target_type, target_name);
+CREATE INDEX IF NOT EXISTS idx_snapshots_time ON state_snapshots(created_at DESC);
+
+
+-- ============================================================================
+-- NEW SCHEMA: n8n Workflow Executions (Phase 3 - Self-Sufficiency Roadmap)
+-- ============================================================================
+
+-- Track n8n workflow executions triggered by Jarvis
+CREATE TABLE IF NOT EXISTS n8n_executions (
+    id SERIAL PRIMARY KEY,
+    workflow_id VARCHAR(100) NOT NULL,
+    workflow_name VARCHAR(255),
+    execution_id VARCHAR(100),
+    alert_name VARCHAR(255),                  -- Alert that triggered workflow
+    alert_instance VARCHAR(255),
+    input_data JSONB,                         -- Data passed to workflow
+    status VARCHAR(20),                       -- 'started', 'success', 'failed', 'timeout'
+    output_data JSONB,                        -- Response from workflow
+    started_at TIMESTAMP DEFAULT NOW(),
+    completed_at TIMESTAMP,
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_n8n_workflow ON n8n_executions(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_n8n_execution_id ON n8n_executions(execution_id);
+CREATE INDEX IF NOT EXISTS idx_n8n_status ON n8n_executions(status);
+CREATE INDEX IF NOT EXISTS idx_n8n_time ON n8n_executions(started_at DESC);
+
 
 -- Grant permissions
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO jarvis;

@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "AI Remediation Service"
-    app_version: str = "3.3.1"
+    app_version: str = "3.8.0"
     debug: bool = False
 
     # API Server
@@ -26,17 +26,18 @@ class Settings(BaseSettings):
 
     # Claude API
     anthropic_api_key: str
-    claude_model: str = "claude-sonnet-4-5-20250929"
+    claude_model: str = "claude-3-5-haiku-20241022"
     claude_max_tokens: int = 4000
     claude_timeout: int = 60
 
     # SSH Configuration
-    # HIGH-003 FIX: All hosts use consistent key path /app/ssh_key (mounted in docker-compose.yml)
-    ssh_nexus_host: str = "192.168.0.11"
-    ssh_nexus_user: str = "jordan"
+    # All hosts use consistent key path /app/ssh_key (mounted in docker-compose.yml)
+    # Override these via environment variables for your infrastructure
+    ssh_nexus_host: str = "localhost"
+    ssh_nexus_user: str = "root"
     ssh_nexus_key_path: str = "/app/ssh_key"
 
-    ssh_homeassistant_host: str = "192.168.0.10"
+    ssh_homeassistant_host: str = "localhost"
     ssh_homeassistant_user: str = "root"
     ssh_homeassistant_key_path: str = "/app/ssh_key"
 
@@ -45,8 +46,8 @@ class Settings(BaseSettings):
     ssh_outpost_key_path: str = "/app/ssh_key"
 
     # Skynet - where Jarvis runs, but SSH to access host filesystem
-    ssh_skynet_host: str = "192.168.0.13"
-    ssh_skynet_user: str = "t1"
+    ssh_skynet_host: str = "localhost"
+    ssh_skynet_user: str = "root"
     ssh_skynet_key_path: str = "/app/ssh_key"
 
     ssh_timeout: int = 60
@@ -73,6 +74,35 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"
+
+    # Phase 1: Prometheus & Loki for verification and log queries
+    # Override these via environment variables for your infrastructure
+    prometheus_url: str = "http://localhost:9090"
+    loki_url: str = "http://localhost:3100"
+
+    # Verification settings
+    verification_enabled: bool = True
+    verification_max_wait_seconds: int = 120
+    verification_poll_interval: int = 10
+    verification_initial_delay: int = 10
+
+    # Phase 2: Home Assistant integration
+    # Override these via environment variables for your infrastructure
+    ha_url: str = "http://localhost:8123"
+    ha_supervisor_url: str = "http://supervisor/core"  # Supervisor API (internal to HA)
+    ha_token: Optional[str] = None  # Long-lived access token
+
+    # Phase 3: n8n workflow orchestration
+    # Override these via environment variables for your infrastructure
+    n8n_url: str = "http://localhost:5678"
+    n8n_api_key: Optional[str] = None  # n8n API key for workflow execution
+
+    # Phase 3: Proactive monitoring
+    proactive_monitoring_enabled: bool = True
+    proactive_check_interval: int = 300  # 5 minutes
+    disk_exhaustion_warning_hours: int = 24  # Warn if disk fills in <24h
+    cert_expiry_warning_days: int = 30  # Warn if cert expires in <30 days
+    memory_leak_threshold_mb_per_hour: float = 5.0  # Memory growth rate threshold
 
     model_config = SettingsConfigDict(
         env_file=".env",

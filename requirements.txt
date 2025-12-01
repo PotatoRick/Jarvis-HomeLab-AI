@@ -21,6 +21,9 @@ anthropic==0.39.0
 # Logging
 structlog==24.4.0
 
+# Monitoring
+prometheus-client==0.21.0
+
 # Utilities
 python-dotenv==1.0.1
 python-multipart==0.0.12

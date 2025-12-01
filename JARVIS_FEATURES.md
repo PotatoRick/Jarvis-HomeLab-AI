@@ -33,16 +33,9 @@ Common issues Jarvis fixes automatically:
 - Service unhealthy → Restart service
 - PostgreSQL down → Restart PostgreSQL
 - Disk space critical → Docker prune
-- WireGuard VPN disconnected → Restart WireGuard **on both endpoints**
+- WireGuard VPN disconnected → Restart WireGuard
 
 **Fix time:** 10-45 seconds vs. 30+ minutes manual
-
-### 🌐 **Cross-System Intelligence** *(New Nov 2025)*
-VPN and network issues often have root causes on multiple systems:
-- Detects VPN/WireGuard alerts automatically
-- Investigates **both Nexus AND Outpost** endpoints
-- Provides context to AI: "Check both hosts, issue could be routing, interface names, or config on either end"
-- Dramatically improves VPN remediation success rate
 
 ### 💪 **Resilient Architecture**
 Survives failures and keeps working:
@@ -110,13 +103,11 @@ maintenance-status   # Check active maintenance
 
 ## Safety Features
 
-- Command validation (blacklist-only, safe operations allowed)
+- Command validation (whitelist of safe operations)
 - Risk assessment (LOW/MEDIUM/HIGH)
-- **Smart Risk Override**: Safe restarts execute even when AI suggests HIGH risk
-- High-risk operations with complex commands escalated to Discord
+- High-risk operations escalated to Discord
 - SSH key authentication (no passwords)
-- Proper `sudo` for systemctl commands (required on remote hosts)
-- Execution logging (every command tracked, including escalations)
+- Execution logging (every command tracked)
 - Attempt limits (max 20 per alert)
 
 **Never executes:** `rm -rf`, `dd`, `mkfs`, firewall flushes, etc.
@@ -145,14 +136,12 @@ Plus faster fixes (no API latency) and continuous improvement.
 
 ## Quick Stats
 
-- ✅ **16 pre-seeded patterns** (common issues)
-- ✅ **Cross-system VPN remediation** (checks both endpoints)
+- ✅ **14 pre-seeded patterns** (common issues)
 - ✅ **80%+ alert noise reduction** (suppression)
 - ✅ **60-80% cost reduction** (after learning)
 - ✅ **10-45 second** fix times
 - ✅ **24/7 operation** (no human intervention)
 - ✅ **Production-ready** (resilient to failures)
-- ✅ **Complete audit trail** (all attempts logged)
 
 ---
 

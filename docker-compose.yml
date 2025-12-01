@@ -55,10 +55,6 @@ services:
       - SSH_OUTPOST_USER=${SSH_OUTPOST_USER:-root}
       - SSH_OUTPOST_KEY_PATH=/app/ssh_key
 
-      - SSH_SKYNET_HOST=${SSH_SKYNET_HOST:-192.168.0.13}
-      - SSH_SKYNET_USER=${SSH_SKYNET_USER:-t1}
-      - SSH_SKYNET_KEY_PATH=/app/ssh_key
-
       # Discord
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
       - DISCORD_ENABLED=${DISCORD_ENABLED:-true}

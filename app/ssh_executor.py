@@ -22,7 +22,6 @@ logger = structlog.get_logger()
 DANGEROUS_COMMAND_PATTERNS = [
     r';',                 # Command separator
     r'(?<!\d)&(?![\d>])', # Ampersand (background) but not 2>&1 or &>
-    r'\|(?!\|)',          # Pipe (but not ||)
     r'`',                 # Backtick command substitution
     r'\$\(',              # Command substitution
     r'\$\{',              # Variable expansion
@@ -37,8 +36,64 @@ DANGEROUS_COMMAND_PATTERNS = [
     r'\bexec\s',          # Exec command
 ]
 
+# Safe pipe patterns - these are read-only commands commonly used for diagnostics
+# Each pattern is (left side regex, right side regex) for "left | right" commands
+SAFE_PIPE_PATTERNS = [
+    (r'dmesg', r'tail'),                    # dmesg | tail -N
+    (r'dmesg', r'head'),                    # dmesg | head -N
+    (r'dmesg', r'grep'),                    # dmesg | grep pattern
+    (r'docker\s+ps', r'grep'),              # docker ps | grep name
+    (r'docker\s+logs', r'tail'),            # docker logs | tail
+    (r'docker\s+logs', r'grep'),            # docker logs | grep
+    (r'systemctl\s+list', r'grep'),         # systemctl list-* | grep
+    (r'journalctl', r'tail'),               # journalctl | tail
+    (r'journalctl', r'grep'),               # journalctl | grep
+    (r'cat\s', r'grep'),                    # cat file | grep
+    (r'cat\s', r'head'),                    # cat file | head
+    (r'cat\s', r'tail'),                    # cat file | tail
+    (r'ls\s', r'grep'),                     # ls | grep
+    (r'ps\s', r'grep'),                     # ps | grep
+    (r'find\s', r'head'),                   # find | head
+    (r'rclone\s+lsf', r'grep'),             # rclone lsf | grep
+    (r'rclone\s+lsf', r'sort'),             # rclone lsf | sort
+    (r'rclone\s+lsf', r'head'),             # rclone lsf | head
+]
+
 # Compiled pattern for efficiency
 DANGEROUS_PATTERN_RE = re.compile('|'.join(DANGEROUS_COMMAND_PATTERNS))
+
+
+def _is_safe_pipe_command(command: str) -> bool:
+    """
+    Check if a command containing a pipe matches safe pipe patterns.
+
+    Args:
+        command: Command string with pipe(s)
+
+    Returns:
+        True if the pipe usage matches a known safe pattern
+    """
+    if '|' not in command:
+        return True
+
+    # Split on pipes and check each pair
+    parts = command.split('|')
+    for i in range(len(parts) - 1):
+        left = parts[i].strip()
+        right = parts[i + 1].strip()
+
+        # Check if this pipe matches any safe pattern
+        is_safe_pair = False
+        for left_pattern, right_pattern in SAFE_PIPE_PATTERNS:
+            if re.search(left_pattern, left, re.IGNORECASE) and \
+               re.match(right_pattern, right, re.IGNORECASE):
+                is_safe_pair = True
+                break
+
+        if not is_safe_pair:
+            return False
+
+    return True
 
 
 def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
@@ -46,6 +101,7 @@ def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
     Validate that a command doesn't contain obvious injection attempts.
 
     SECURITY-003 FIX: Checks for shell metacharacters and dangerous patterns.
+    Safe pipe patterns (like dmesg | tail) are explicitly allowed.
 
     Note: This is a defense-in-depth measure. The primary protection is the
     command whitelist in the Claude agent. This catches anything that slips through.
@@ -56,6 +112,7 @@ def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
     Returns:
         Tuple of (is_safe: bool, reason: Optional[str])
     """
+    # Check for dangerous patterns first
     if DANGEROUS_PATTERN_RE.search(command):
         match = DANGEROUS_PATTERN_RE.search(command)
         return False, f"Dangerous pattern detected: '{match.group()}'"
@@ -63,6 +120,10 @@ def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
     # Check for newlines (could be used to inject commands)
     if '\n' in command or '\r' in command:
         return False, "Newline characters not allowed in commands"
+
+    # Check pipe commands against safe patterns
+    if '|' in command and not _is_safe_pipe_command(command):
+        return False, "Pipe to unknown command not allowed"
 
     return True, None
 
