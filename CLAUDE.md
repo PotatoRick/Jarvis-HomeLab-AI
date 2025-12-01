@@ -73,6 +73,40 @@ The Jarvis Hub website (jarvis.theburrow.casa) provides:
 - **Registry Browser** - View available Docker image versions
 - **GitHub Link** - Direct link to source repository
 
+### Publishing New Releases (Maintainers)
+
+The registry runs on Outpost and doesn't accept remote pushes. To publish a new version:
+
+```bash
+# 1. Build the image locally (from ai-remediation-service directory)
+docker build -t registry.theburrow.casa/jarvis:X.Y.Z \
+             -t registry.theburrow.casa/jarvis:latest .
+
+# 2. Save image to tarball
+docker save registry.theburrow.casa/jarvis:X.Y.Z | gzip > /tmp/jarvis-X.Y.Z.tar.gz
+
+# 3. Copy tarball to Outpost
+scp /tmp/jarvis-X.Y.Z.tar.gz outpost:/tmp/
+
+# 4. SSH to Outpost, load image, and push to local registry
+ssh outpost
+gunzip -c /tmp/jarvis-X.Y.Z.tar.gz | docker load
+
+# 5. Tag for local registry (registry container IP may vary)
+REGISTRY_IP=$(docker inspect jarvis-registry --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+docker tag registry.theburrow.casa/jarvis:X.Y.Z ${REGISTRY_IP}:5000/jarvis:X.Y.Z
+docker tag registry.theburrow.casa/jarvis:X.Y.Z ${REGISTRY_IP}:5000/jarvis:latest
+
+# 6. Push to registry
+docker push ${REGISTRY_IP}:5000/jarvis:X.Y.Z
+docker push ${REGISTRY_IP}:5000/jarvis:latest
+
+# 7. Verify
+curl -s https://registry.theburrow.casa/v2/jarvis/tags/list
+```
+
+**Note:** The registry container is on Docker's internal network, so pushes must go to the container IP (e.g., `172.18.0.5:5000`), not `localhost` or the public URL.
+
 ## Quick Reference
 
 ```bash
