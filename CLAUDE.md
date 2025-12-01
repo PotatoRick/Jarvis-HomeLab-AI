@@ -4,6 +4,75 @@ AI-powered infrastructure alert remediation for homelabs. Automatically analyzes
 
 **Current Version:** 3.8.0 (Phase 4 Complete)
 
+## Distribution Architecture
+
+Jarvis is distributed through three interconnected components:
+
+```
++---------------------------+     +---------------------------+     +---------------------------+
+|    GitHub Repository      |     |    Jarvis Hub Website     |     |    Docker Registry        |
+|  github.com/PotatoRick/   |     |  jarvis.theburrow.casa    |     | registry.theburrow.casa   |
+|   Jarvis-HomeLab-AI       |     |                           |     |                           |
++---------------------------+     +---------------------------+     +---------------------------+
+|                           |     |                           |     |                           |
+| - Source code             |     | - Dashboard UI            |     | - Docker images           |
+| - Documentation           |     | - Changelog viewer        |     | - Version tags            |
+| - Release tags            |     | - Deploy instructions     |     | - Public pulls            |
+| - Issue tracking          |     | - Registry browser        |     | - Auth-protected pushes   |
+|                           |     | - Live status from Jarvis |     |                           |
++---------------------------+     +---------------------------+     +---------------------------+
+           |                                   |                                |
+           |                                   |                                |
+           v                                   v                                v
+     git clone / fork                  View docs & status              docker pull images
+```
+
+### Component Details
+
+| Component | URL | Purpose |
+|-----------|-----|---------|
+| **GitHub** | https://github.com/PotatoRick/Jarvis-HomeLab-AI | Source code, documentation, issues |
+| **Jarvis Hub** | https://jarvis.theburrow.casa | Dashboard, changelog, deploy guide |
+| **Registry** | https://registry.theburrow.casa | Docker image distribution |
+
+### Docker Images
+
+Pull images directly from the registry:
+
+```bash
+# Latest stable release
+docker pull registry.theburrow.casa/jarvis:latest
+
+# Specific version
+docker pull registry.theburrow.casa/jarvis:3.8.0
+
+# List available tags
+curl -s https://registry.theburrow.casa/v2/jarvis/tags/list
+```
+
+### Registry API
+
+```bash
+# List repositories
+curl https://registry.theburrow.casa/v2/_catalog
+
+# List tags for jarvis
+curl https://registry.theburrow.casa/v2/jarvis/tags/list
+
+# Get image manifest
+curl https://registry.theburrow.casa/v2/jarvis/manifests/3.8.0
+```
+
+### Jarvis Hub Features
+
+The Jarvis Hub website (jarvis.theburrow.casa) provides:
+
+- **Dashboard** - Real-time status from connected Jarvis instance
+- **Deploy Page** - Step-by-step deployment instructions
+- **Changelog** - Full version history with features and fixes
+- **Registry Browser** - View available Docker image versions
+- **GitHub Link** - Direct link to source repository
+
 ## Quick Reference
 
 ```bash
