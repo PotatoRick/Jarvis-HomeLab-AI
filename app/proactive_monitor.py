@@ -29,18 +29,20 @@ class CheckType(str, Enum):
 class ProactiveMonitor:
     """Detect and fix issues before they become alerts."""
 
-    # Host mapping for SSH targets
+    # Host mapping for SSH targets - configure via environment or override in subclass
+    # Keys should match your Prometheus instance labels
     HOST_MAP = {
-        "192.168.0.11": "nexus",
-        "192.168.0.10": "homeassistant",
-        "192.168.0.13": "skynet"
+        "nexus": "nexus",
+        "homeassistant": "homeassistant",
+        "skynet": "skynet"
     }
 
-    # Node exporter instances to monitor
+    # Node exporter instances to monitor - configure based on your Prometheus targets
+    # These should match your prometheus.yml scrape config targets
     NODE_INSTANCES = [
-        "192.168.0.11:9100",  # Nexus
-        "192.168.0.10:9100",  # Home Assistant
-        "192.168.0.13:9100",  # Skynet
+        "nexus:9100",
+        "homeassistant:9100",
+        "skynet:9100",
     ]
 
     def __init__(

@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: jarvis
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - /home/t1/jarvis-data/postgres:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     ports:
       - "5433:5432"
@@ -40,14 +40,14 @@ services:
 
       # Claude API
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-5-20250929}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-haiku-20241022}
 
-      # SSH Configuration
-      - SSH_NEXUS_HOST=${SSH_NEXUS_HOST:-192.168.0.11}
-      - SSH_NEXUS_USER=${SSH_NEXUS_USER:-jordan}
+      # SSH Configuration - configure these for your infrastructure
+      - SSH_NEXUS_HOST=${SSH_NEXUS_HOST:-localhost}
+      - SSH_NEXUS_USER=${SSH_NEXUS_USER:-root}
       - SSH_NEXUS_KEY_PATH=/app/ssh_key
 
-      - SSH_HOMEASSISTANT_HOST=${SSH_HOMEASSISTANT_HOST:-192.168.0.10}
+      - SSH_HOMEASSISTANT_HOST=${SSH_HOMEASSISTANT_HOST:-localhost}
       - SSH_HOMEASSISTANT_USER=${SSH_HOMEASSISTANT_USER:-root}
       - SSH_HOMEASSISTANT_KEY_PATH=/app/ssh_key
 
@@ -89,3 +89,6 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "traefik.enable=false"
+
+volumes:
+  postgres-data:

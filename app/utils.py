@@ -38,14 +38,14 @@ def determine_target_host(alert: Alert, hints: Optional[Dict[str, Any]] = None) 
 
     instance = alert.labels.instance.lower()
 
-    # Check for explicit host indicators
-    if "outpost" in instance or "72.60.163.242" in instance or "vps" in instance:
+    # Check for explicit host indicators (hostname-based, not IP-based for portability)
+    if "outpost" in instance or "vps" in instance:
         return HostType.OUTPOST
-    elif "homeassistant" in instance or "192.168.0.10" in instance or "ha" in instance:
+    elif "homeassistant" in instance or "ha" in instance:
         return HostType.HOMEASSISTANT
-    elif "skynet" in instance or "192.168.0.13" in instance:
+    elif "skynet" in instance:
         return HostType.SKYNET
-    elif "nexus" in instance or "192.168.0.11" in instance:
+    elif "nexus" in instance:
         return HostType.NEXUS
 
     # Default based on common service patterns

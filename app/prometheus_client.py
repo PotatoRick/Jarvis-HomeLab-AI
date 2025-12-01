@@ -26,7 +26,7 @@ class PrometheusClient:
             base_url: Prometheus URL (defaults to settings.prometheus_url)
         """
         self.base_url = base_url or getattr(
-            settings, 'prometheus_url', 'http://192.168.0.11:9090'
+            settings, 'prometheus_url', 'http://localhost:9090'
         )
         self.timeout = 10.0
         self.logger = logger.bind(component="prometheus_client")
@@ -260,7 +260,7 @@ class PrometheusClient:
 
         Args:
             metric: Prometheus metric name
-            instance: Target instance (e.g., "192.168.0.11:9100")
+            instance: Target instance (e.g., "hostname:9100")
             hours: Hours of history to analyze
 
         Returns:

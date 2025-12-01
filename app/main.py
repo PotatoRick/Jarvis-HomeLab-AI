@@ -265,7 +265,7 @@ async def prometheus_metrics():
     Add to Prometheus scrape config:
         - job_name: 'jarvis'
           static_configs:
-            - targets: ['192.168.0.13:8000']
+            - targets: ['your-jarvis-host:8000']
     """
     return metrics.get_metrics_response()
 
@@ -1387,10 +1387,10 @@ For VPN issues, check both endpoints - the problem might be routing, interface n
 # Service: {service_name or 'unknown'} ({service_type})
 # Instance: {alert_instance}
 {cross_system_note}
-This is part of The Burrow homelab infrastructure. Systems available:
-- nexus (192.168.0.11): Docker host with most services, WireGuard endpoint
-- homeassistant (192.168.0.10): Home automation hub
-- outpost (VPS 72.60.163.242): Cloud gateway with n8n, Headscale, WireGuard endpoint
+This is a homelab infrastructure. Systems available (configure via SSH_*_HOST env vars):
+- nexus: Docker host with most services, WireGuard endpoint
+- homeassistant: Home automation hub
+- outpost: Cloud gateway with n8n, Headscale, WireGuard endpoint
 
 Common issues and fixes:
 - Container crashes: docker restart <container>

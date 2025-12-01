@@ -395,14 +395,14 @@ class LearningEngine:
                 value = labels[label]
                 # Normalize instance-specific values
                 if label in ['instance', 'host']:
-                    # Extract host type (nexus, homeassistant, etc)
+                    # Extract host type (nexus, homeassistant, etc) - hostname-based for portability
                     if 'nexus' in value.lower():
                         parts.append('host:nexus')
-                    elif 'homeassistant' in value.lower() or '192.168.0.10' in value:
+                    elif 'homeassistant' in value.lower() or 'ha' in value.lower():
                         parts.append('host:homeassistant')
-                    elif 'outpost' in value.lower() or '72.60.163.242' in value:
+                    elif 'outpost' in value.lower() or 'vps' in value.lower():
                         parts.append('host:outpost')
-                    elif 'skynet' in value.lower() or '192.168.0.13' in value:
+                    elif 'skynet' in value.lower():
                         parts.append('host:skynet')
                     else:
                         parts.append(f'{label}:generic')

@@ -168,7 +168,7 @@ class ClaudeAgent:
                         },
                         "instance": {
                             "type": "string",
-                            "description": "Target instance (e.g., '192.168.0.11:9100' for node_exporter, '192.168.0.11:9323' for Docker)"
+                            "description": "Target instance (e.g., 'hostname:9100' for node_exporter, 'hostname:9323' for Docker)"
                         },
                         "hours": {
                             "type": "integer",

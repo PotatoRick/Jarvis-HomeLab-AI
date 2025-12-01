@@ -25,7 +25,7 @@ class LokiClient:
             base_url: Loki URL (defaults to settings.loki_url)
         """
         self.base_url = base_url or getattr(
-            settings, 'loki_url', 'http://192.168.0.11:3100'
+            settings, 'loki_url', 'http://localhost:3100'
         )
         self.timeout = 15.0
         self.logger = logger.bind(component="loki_client")
