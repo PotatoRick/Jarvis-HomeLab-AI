@@ -52,21 +52,21 @@ INSERT INTO remediation_patterns (
     -- Home Assistant backup (most common case from today's issue)
     ('BackupStale', 'backup', 'BackupStale|system:homeassistant',
      'Home Assistant backup script did not run or failed to upload to B2. Scripts run on Skynet, not Nexus.',
-     ARRAY['/home/t1/homelab/scripts/backup/backup_homeassistant_notify.sh'],
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh'],
      'skynet',
      0.90, 'seed', '{"description": "Runs HA backup script on Skynet. Alert comes from Nexus metrics but fix runs on Skynet."}'::jsonb),
 
     -- Nexus backup
     ('BackupStale', 'backup', 'BackupStale|system:nexus',
      'Nexus backup script did not run or failed',
-     ARRAY['cd /home/jordan/docker/home-stack && ./backup.sh'],
+     ARRAY['cd /home/<user>/docker/home-stack && ./backup.sh'],
      'nexus',
      0.85, 'seed', '{"description": "Runs Nexus backup script locally"}'::jsonb),
 
     -- Skynet backup
     ('BackupStale', 'backup', 'BackupStale|system:skynet',
      'Skynet backup script did not run or failed',
-     ARRAY['/home/t1/homelab/scripts/backup/backup_skynet.sh'],
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_skynet.sh'],
      'skynet',
      0.85, 'seed', '{"description": "Runs Skynet backup script locally"}'::jsonb),
 
@@ -80,7 +80,7 @@ INSERT INTO remediation_patterns (
     -- Backup health check (cron job monitoring)
     ('BackupHealthCheckStale', 'monitoring', 'BackupHealthCheckStale|category:monitoring',
      'Backup health check cron job is not running on Skynet',
-     ARRAY['/home/t1/homelab/scripts/backup/check_b2_backups.sh'],
+     ARRAY['/home/<user>/homelab/scripts/backup/check_b2_backups.sh'],
      'skynet',
      0.85, 'seed', '{"description": "Runs backup check on Skynet and pushes metrics to Nexus"}'::jsonb)
 

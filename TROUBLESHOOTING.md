@@ -140,7 +140,7 @@ curl -X POST http://localhost:8000/webhook \
 **Solution:**
 ```bash
 # Check Alertmanager config
-ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml | grep jarvis'
+ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep jarvis'
 
 # Should see:
 # - name: 'jarvis'
@@ -148,7 +148,7 @@ ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.y
 #     - url: 'http://jarvis:8000/webhook'
 
 # If missing, add receiver
-ssh nexus 'nano /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Reload Alertmanager
 ssh nexus 'docker exec alertmanager kill -HUP 1'
@@ -176,10 +176,10 @@ docker network connect alertmanager_network jarvis
 ```bash
 # Verify password matches
 cat .env | grep WEBHOOK_AUTH_PASSWORD
-ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml | grep password'
+ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep password'
 
 # Update Alertmanager config
-ssh nexus 'nano /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Reload Alertmanager
 ssh nexus 'docker exec alertmanager kill -HUP 1'
@@ -255,10 +255,10 @@ curl http://localhost:8000/health | jq '.maintenance_mode'
 **Diagnosis:**
 ```bash
 # Test SSH manually
-docker exec jarvis ssh -i /app/ssh_key jordan@192.168.0.11 'echo test'
+docker exec jarvis ssh -i /app/ssh_key jordan@<service-host-ip> 'echo test'
 
 # Check network connectivity
-docker exec jarvis ping -c 3 192.168.0.11
+docker exec jarvis ping -c 3 <service-host-ip>
 ```
 
 **Common Causes:**
@@ -300,7 +300,7 @@ ssh nexus 'chmod 600 ~/.ssh/authorized_keys'
 **Solution:**
 ```bash
 # Test connectivity
-ping -c 3 192.168.0.11
+ping -c 3 <service-host-ip>
 
 # Check SSH daemon
 ssh nexus 'systemctl status sshd'
@@ -375,7 +375,7 @@ import asyncio
 import asyncpg
 
 async def test():
-    conn = await asyncpg.connect('postgresql://n8n:PASSWORD@72.60.163.242:5432/finance_db')
+    conn = await asyncpg.connect('postgresql://n8n:PASSWORD@<vps-ip>:5432/finance_db')
     print('Connected!')
     await conn.close()
 
@@ -622,7 +622,7 @@ Discord limits webhooks to 30 requests per minute.
 ```bash
 # Reduce notification frequency
 # Increase Alertmanager repeat_interval
-ssh nexus 'nano /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Set: repeat_interval: 30m
 ```
@@ -838,7 +838,7 @@ docker logs jarvis | grep "closing_ssh_connection"
 docker logs jarvis | grep "webhook_received" | grep "ContainerDown" | tail -20
 
 # Check Alertmanager group_interval
-ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml | grep group_interval'
+ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep group_interval'
 ```
 
 **Common Causes:**
@@ -857,7 +857,7 @@ ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.y
 
 **Solution:**
 ```bash
-ssh nexus 'nano /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Change:
 # group_interval: 10s
@@ -1093,10 +1093,10 @@ print(json.dumps({
 docker exec jarvis ping -c 3 alertmanager
 
 # Test SSH connectivity
-docker exec jarvis nc -zv 192.168.0.11 22
+docker exec jarvis nc -zv <service-host-ip> 22
 
 # Test database connectivity
-docker exec jarvis nc -zv 72.60.163.242 5432
+docker exec jarvis nc -zv <vps-ip> 5432
 
 # Test Discord webhook
 docker exec jarvis curl -I "$DISCORD_WEBHOOK_URL"
@@ -1157,7 +1157,7 @@ If issues persist after trying these solutions:
 ### If You're Still Experiencing Issues
 Ensure you're running the latest version:
 ```bash
-cd /home/t1/homelab/projects/ai-remediation-service
+cd /home/<user>/homelab/projects/ai-remediation-service
 git pull origin main
 docker compose build
 docker compose up -d

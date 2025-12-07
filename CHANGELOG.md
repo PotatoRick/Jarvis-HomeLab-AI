@@ -5,6 +5,395 @@ All notable changes to Jarvis AI Remediation Service will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.1] - 2025-12-07
+
+### Fixed: QA Review Issues for Phase 5
+
+**Comprehensive fixes from QA review addressing security, reliability, and robustness issues.**
+
+---
+
+### Fixed
+
+#### Critical Issues
+- **CRITICAL-002**: Added n8n workflow existence validation on startup - Jarvis now checks if the self-restart webhook is accessible and logs warnings if not (`app/main.py` lifespan)
+- **CRITICAL-003**: Added Phase 5 prerequisite health checks on startup - validates JARVIS_EXTERNAL_URL, n8n connectivity, and webhook availability with clear warnings (`app/main.py` lifespan)
+
+#### High Priority Issues
+- **HIGH-001**: Added Pydantic validator for `JARVIS_EXTERNAL_URL` with URL format validation and localhost warnings (`app/config.py`)
+- **HIGH-002**: Added size limits to `RemediationContext` serialization - prevents database overflow with `MAX_COMMANDS=50`, `MAX_OUTPUT_LENGTH=10KB`, `MAX_ANALYSIS_LENGTH=20KB` (`app/self_preservation.py`)
+- **HIGH-003**: Improved n8n error differentiation - `trigger_webhook()` now returns specific error types (`workflow_not_found`, `n8n_server_error`, `n8n_client_error`) for better debugging (`app/n8n_client.py`)
+- **HIGH-004**: Fixed potential DB pool exhaustion during stale cleanup - now uses `LIMIT 100` batching to prevent unbounded queries (`app/self_preservation.py`)
+- **HIGH-006**: Fixed race condition in concurrent restart requests - now uses PostgreSQL advisory lock (`pg_advisory_xact_lock`) within transaction to ensure atomicity (`app/self_preservation.py`)
+- **HIGH-007**: Added Pydantic validators for all Phase 5 configuration with bounds checking for `stale_handoff_cleanup_minutes` (10-1440) and `self_restart_timeout_minutes` (2-60) (`app/config.py`)
+
+#### Medium Priority Issues
+- **MEDIUM-003**: Added exception handling wrapper for continuation background task - catches exceptions, logs with full traceback, and sends Discord notification on crash (`app/main.py`)
+- **MEDIUM-004**: Added authentication to `/resume` endpoint - now accepts HTTP Basic Auth or `X-Jarvis-Handoff-Token` header (`app/main.py`)
+- **MEDIUM-008**: Added restart count tracking to `RemediationContext` to prevent infinite restart loops - defaults to `max_restarts=2` (`app/self_preservation.py`)
+
+### Added
+
+#### n8n Client Enhancements (`app/n8n_client.py`)
+- **`check_webhook_exists()`**: Probes webhook URL to verify n8n workflow is active
+- **`health_check()`**: Checks n8n API health for startup validation
+
+#### Configuration Validators (`app/config.py`)
+- `validate_jarvis_external_url()`: URL format validation with localhost warning
+- `validate_stale_handoff_cleanup()`: Bounds checking (10-1440 minutes)
+- `validate_self_restart_timeout()`: Bounds checking (2-60 minutes)
+- `validate_n8n_url()`: URL format validation with trailing slash normalization
+
+#### RemediationContext Improvements (`app/self_preservation.py`)
+- `restart_count` field: Tracks number of restarts for this remediation
+- `max_restarts` field: Configurable limit (default 2)
+- Size limits constants: `MAX_COMMANDS`, `MAX_OUTPUT_LENGTH`, `MAX_ANALYSIS_LENGTH`
+- Safe serialization fallback: Returns minimal context if JSON serialization fails
+
+### Changed
+
+- **Startup flow**: Now validates Phase 5 prerequisites before accepting traffic
+- **Stale cleanup**: Uses batched processing instead of unbounded query
+- **Self-restart initiation**: Uses database transaction with advisory lock for atomicity
+- **Resume endpoint**: Requires authentication (was previously unauthenticated)
+
+---
+
+## [3.9.0] - 2025-12-07
+
+### Added: Self-Preservation Mechanism (Phase 5)
+
+**"Jarvis can now safely restart itself and its dependencies via n8n orchestration"**
+
+This release introduces a self-preservation mechanism that allows Jarvis to safely restart its own container, database, or even the host system without bricking itself. The restart is orchestrated by n8n which handles the handoff, executes the restart, polls until healthy, and resumes any interrupted work.
+
+**Tested and verified working in production** - Full self-restart cycle completed successfully with Discord notifications.
+
+---
+
+### Added
+
+#### Remediation Context Continuation (v3.9.0 Enhancement)
+- **Context preservation**: When Jarvis triggers a self-restart mid-remediation, it saves the full context:
+  - Alert details (name, instance, fingerprint, severity)
+  - Commands already executed with their outputs
+  - Claude's analysis and reasoning
+  - Target host and service information
+- **Automatic continuation**: After restart, Jarvis automatically continues the interrupted remediation
+- **Smart resumption**: Claude receives context about what was already done to avoid repeating commands
+- **Discord notifications**: Updates sent for continuation progress and results
+
+#### Claude Agent Context Tracking (`app/claude_agent.py`)
+- **`set_remediation_context()`**: Sets current remediation state before analysis
+- **`update_context_commands()`**: Tracks commands as they're executed
+- **`update_context_analysis()`**: Stores Claude's analysis for handoff
+- **`get_remediation_context()`**: Retrieves context for serialization
+- **`clear_remediation_context()`**: Cleans up after successful completion
+
+#### Background Continuation (`app/main.py`)
+- **`continue_interrupted_remediation()`**: Background task that:
+  - Reconstructs context from saved state
+  - Builds continuation prompt with previous work summary
+  - Re-invokes Claude with awareness of what's already been done
+  - Executes any new commands needed
+  - Notifies Discord of continuation results
+
+#### Self-Preservation Manager (`app/self_preservation.py`)
+- **SelfPreservationManager class**: Coordinates safe self-restart operations
+- **RemediationContext model**: Serializable state for in-progress remediations
+- **SelfPreservationHandoff model**: Tracks handoff lifecycle
+- **State serialization**: Saves current remediation state before restart
+- **n8n workflow trigger**: Hands off restart to external orchestrator
+- **Resume capability**: Continues from saved state after restart
+
+#### New API Endpoints
+- **POST `/resume`**: Called by n8n after restart to resume operations
+- **POST `/self-restart`**: Initiate self-restart via n8n handoff (requires auth)
+- **GET `/self-restart/status`**: Check status of active handoffs
+- **POST `/self-restart/cancel`**: Cancel an active handoff
+
+#### Claude Agent Tool
+- **`initiate_self_restart` tool**: Allows Claude to request safe self-restarts
+- Supports targets: `jarvis`, `postgres-jarvis`, `docker-daemon`, `skynet-host`
+- Requires reason for audit trail
+
+#### Command Validator Updates (`app/command_validator.py`)
+- **Self-protection awareness**: Recognizes commands targeting Jarvis dependencies
+- **Handoff override**: Can allow blocked commands when handoff is active
+- **Helpful guidance**: Provides `/self-restart` API instructions when blocking self-restart attempts
+- **`SELF_PROTECTION_PATTERNS`**: List of commands that require handoff mechanism
+
+#### n8n Workflow
+- **`jarvis-self-restart-workflow.json`**: Complete workflow for self-restart orchestration
+- Webhook trigger at `/webhook/jarvis-self-restart`
+- SSH execution of restart commands
+- Health polling with configurable timeout
+- Automatic callback to `/resume` endpoint
+- Discord notifications for start, success, and timeout
+
+#### Database Schema
+- **`self_preservation_handoffs` table**: Persists handoff state across restarts
+- Unique index prevents concurrent handoffs
+- Tracks status, context, n8n execution ID, and timestamps
+
+#### Prometheus Metrics (`app/metrics.py`)
+- **`jarvis_self_restarts_total`**: Counter for self-restart operations by target and status
+- **`jarvis_self_restart_failures_total`**: Counter for failures with specific reason codes
+- **`jarvis_self_restart_duration_seconds`**: Histogram of restart duration by target
+- **`jarvis_self_restart_active`**: Gauge indicating active handoff (1/0)
+
+#### Runbook (`runbooks/JarvisRestart.md`)
+- Comprehensive troubleshooting guide for self-preservation system
+- Covers timeout issues, n8n trigger failures, SSH problems
+- Includes manual recovery procedures
+
+### Changed
+
+- **main.py lifespan**: Initializes SelfPreservationManager on startup
+- **main.py lifespan**: Checks for pending handoffs on startup for recovery
+- **n8n_client.py**: Now initializes even without API key (webhook-only mode)
+- **n8n workflow**: Added 10-minute execution timeout to prevent runaway executions
+
+### Fixed
+
+- **n8n client initialization**: Fixed variable reference so n8n client is properly passed to SelfPreservationManager
+- **Test handoffs**: `/resume` endpoint now accepts test handoff IDs (prefix `test-`) without database record
+- **Context tracking during tool execution**: `update_context_commands()` now called for `restart_service` and `execute_safe_command` tools
+- **Analysis context preservation**: `update_context_analysis()` now called after Claude returns its analysis
+- **Callback URL configuration**: Added `JARVIS_EXTERNAL_URL` setting to ensure n8n can reach Jarvis callback
+- **Stale handoff cleanup**: Added `cleanup_stale_handoffs()` method that runs on startup to clear abandoned handoffs
+
+### Technical Details
+
+The self-preservation flow:
+1. Claude or API initiates self-restart with target and reason
+2. SelfPreservationManager serializes current remediation state to database
+   - Captures: alert details, commands executed, outputs, Claude analysis, target host
+3. n8n workflow is triggered via webhook with restart details
+4. n8n responds immediately with handoff acknowledgment
+5. n8n executes restart command via SSH
+6. n8n polls Jarvis `/health` endpoint until healthy (10s intervals)
+7. n8n calls `/resume` endpoint with handoff_id
+8. Jarvis marks handoff complete
+9. **If remediation context exists**, Jarvis schedules background continuation:
+   - Reconstructs context from saved state
+   - Re-invokes Claude with summary of previous work
+   - Claude determines if additional actions needed after restart
+   - Executes any new commands (avoids repeating already-executed ones)
+10. Discord notifications sent at each stage (including continuation results)
+
+### Protected Targets
+
+| Target | Command | Description |
+|--------|---------|-------------|
+| `jarvis` | `docker restart jarvis` | Jarvis container |
+| `postgres-jarvis` | `docker restart postgres-jarvis && sleep 10 && docker restart jarvis` | Database + Jarvis |
+| `docker-daemon` | `sudo systemctl restart docker` | Docker service |
+| `skynet-host` | `sudo reboot` | Full host reboot |
+
+### Migration
+
+For existing databases, run:
+```sql
+\i migrations/v3.9.0_self_preservation.sql
+```
+
+### Configuration
+
+Ensure these are configured in `.env`:
+```env
+# n8n integration
+N8N_URL=https://n8n.yourdomain.com
+N8N_API_KEY=your_api_key  # Optional for webhook-only mode
+
+# Self-preservation (IMPORTANT: must be reachable from n8n host)
+JARVIS_EXTERNAL_URL=http://<management-host-ip>:8000
+SELF_RESTART_TIMEOUT_MINUTES=10
+STALE_HANDOFF_CLEANUP_MINUTES=30
+```
+
+Import the workflow `configs/n8n-workflows/jarvis-self-restart-workflow.json` into n8n.
+
+Configure SSH credentials in n8n:
+- Create credential named `skynet-ssh` with SSH key access to Skynet (<management-host-ip>)
+
+---
+
+## [3.8.1] - 2025-12-06
+
+### Fixed: BackupStale Multi-System Remediation + Frigate Monitoring Enhancement
+
+**"Jarvis now correctly handles BackupStale alerts for all systems and has enhanced Frigate database corruption detection"**
+
+This release includes two major improvements:
+1. BackupStale alerts now correctly route to the appropriate host based on the `system` label
+2. Enhanced Frigate health monitoring to detect database corruption that prevents event storage
+
+---
+
+### Part 1: BackupStale Multi-System Remediation
+
+This fixes a critical issue where BackupStale alerts were failing with exit code 127 (command not found) because:
+1. The Prometheus alert rule had static `remediation_host: skynet` and `remediation_commands` that only applied to homeassistant
+2. The database seed patterns had incorrect script paths
+3. The `system` label was not being used to derive the correct host and script
+
+### Changed
+
+#### System-Aware Hint Extraction (`app/utils.py`)
+- **Enhanced `extract_hints_from_alert()`**: Now detects BackupStale alerts and derives correct `target_host` and `remediation_commands` from the `system` label
+- Added `backup_remediation_map` with system-to-script mappings:
+  - `homeassistant` -> skynet -> `/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh`
+  - `skynet` -> skynet -> `/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh`
+  - `nexus` -> nexus -> `/home/<user>/docker/backups/backup_notify.sh`
+  - `outpost` -> outpost -> `/opt/<app>/backups/backup_vps_notify.sh`
+
+#### Corrected Database Seed Patterns (`init-db.sql`)
+- Fixed all BackupStale patterns with correct script paths
+- Now uses separate INSERT statement with `target_host` column explicitly populated
+- Added `BackupHealthCheckStale` pattern with correct path
+
+#### Updated Runbook (`runbooks/BackupStale.md`)
+- Complete rewrite with system-specific remediation table
+- Added data flow diagram explaining metrics vs fix locations
+- Clear documentation that `instance` label is misleading (always shows nexus:9100)
+- System-specific command sections for each backup type
+
+### Added
+
+- **Migration script**: `migrations/v3.8.1_fix_backup_patterns.sql`
+  - Safely updates existing database with correct patterns
+  - Clears old failure patterns to give fresh start
+  - Includes verification step
+- **Prometheus alert reference**: `configs/prometheus_backup_alerts.yml`
+  - Reference configuration without misleading static hints
+  - Should be deployed to Nexus to replace current BackupStale rules
+
+### Technical Details
+
+The root cause was a mismatch between:
+1. **Where metrics come from**: Nexus textfile collector (scraped via node_exporter)
+2. **Where the `system` label indicates**: Which backup is stale
+3. **Where fixes should run**: Varies by system (skynet, nexus, or outpost)
+
+The static `remediation_host: skynet` label in the Prometheus alert rule was correct for homeassistant backups but wrong for outpost/nexus backups. Now Jarvis dynamically determines the correct host from the `system` label.
+
+### Configuration Updates
+
+#### `.env` additions
+```env
+# Prometheus & Loki (on Nexus)
+PROMETHEUS_URL=http://<service-host-ip>:9090
+LOKI_URL=http://<service-host-ip>:3100
+
+# Verification Settings
+VERIFICATION_ENABLED=true
+VERIFICATION_MAX_WAIT_SECONDS=120
+VERIFICATION_POLL_INTERVAL=10
+```
+
+#### `docker-compose.yml` additions
+- Added `PROMETHEUS_URL`, `LOKI_URL` environment variables
+- Added `VERIFICATION_ENABLED`, `VERIFICATION_MAX_WAIT_SECONDS`, `VERIFICATION_POLL_INTERVAL`
+
+#### Prometheus Alert Rules (on Nexus)
+- Updated `BackupStale` and `BackupAgingWarning` alerts to remove static `remediation_host` and `remediation_commands`
+- Added notes explaining Jarvis v3.8.1+ handles routing dynamically
+
+### Deployment Steps
+
+1. Apply database migration:
+```bash
+docker exec -i postgres-jarvis psql -U jarvis -d jarvis < migrations/v3.8.1_fix_backup_patterns.sql
+```
+
+2. Rebuild and restart Jarvis with new config:
+```bash
+cd /home/<user>/homelab/projects/ai-remediation-service
+docker compose up -d --force-recreate jarvis
+```
+
+3. Verify Prometheus connectivity:
+```bash
+docker exec jarvis curl -s http://<service-host-ip>:9090/api/v1/status/runtimeinfo
+```
+
+4. Prometheus alert rules have been updated on Nexus (static hints removed)
+
+---
+
+### Part 2: Enhanced Frigate Database Corruption Detection
+
+A Frigate database corruption incident revealed a gap in monitoring: the existing health checks passed (API responding, cameras online) even when the database was corrupted and unable to store new events.
+
+#### Problem
+- Frigate SQLite database corruption prevented event storage
+- Cameras showed "no events found" despite motion detection working
+- Existing monitoring showed "healthy" because API responded with cached data
+
+#### Solution
+
+**1. Enhanced Frigate Health Exporter v2** (`scripts/exporters/frigate_health_exporter.sh`)
+
+New metrics added:
+- `frigate_events_api_up` - Direct database access check via `/api/events`
+- `frigate_events_recent` - Whether events were recorded in last hour (staleness detection)
+- `frigate_events_last_hour` - Count of recent events for trending
+- Expanded error pattern matching (8 patterns, last 500 lines)
+
+**2. New Prometheus Alert Rules** (`configs/prometheus/alert_rules.yml`)
+
+```yaml
+- alert: FrigateEventsStale
+  expr: frigate_events_recent == 0 and frigate_cameras_receiving_frames == 1 and frigate_api_up == 1
+  for: 30m
+  # Fires when cameras are online but no events recorded for 1+ hour
+
+- alert: FrigateEventsAPIDown
+  expr: frigate_events_api_up == 0 and frigate_api_up == 1
+  for: 5m
+  # Fires when events API fails but main API works (direct DB corruption detection)
+```
+
+**3. New Jarvis Runbook** (`runbooks/FrigateDatabaseError.md`)
+- Covers FrigateDatabaseError, FrigateEventsAPIDown, FrigateEventsStale, FrigateCamerasNotReceivingFrames
+- Investigation steps, common causes, remediation commands
+- Verification steps after restart
+
+**4. Docker Compose Update**
+- Added `./runbooks:/app/runbooks:ro` volume mount for hot-reload of runbooks
+
+#### Deployment
+
+1. Deploy updated exporter to Nexus:
+```bash
+scp scripts/exporters/frigate_health_exporter.sh nexus:/opt/exporters/
+ssh nexus 'sudo chmod 755 /opt/exporters/frigate_health_exporter.sh'
+```
+
+2. Deploy updated alert rules to Nexus:
+```bash
+scp configs/prometheus/alert_rules.yml nexus:/home/<user>/docker/home-stack/prometheus/
+ssh nexus 'docker exec prometheus kill -HUP 1'
+```
+
+3. Restart Jarvis to pick up new runbook mount:
+```bash
+docker compose up -d jarvis
+```
+
+#### Additional Fixes in This Session
+
+- **Pydantic v2 Extra Field Access**: Fixed `_get_extra_field()` helper in `utils.py` to properly access `model_extra` dict for extra fields like `system` label
+- **Hints Passed to Claude**: Updated `claude_agent.py` to include extracted hints (system, target_host, system_specific_command) in the Claude prompt
+- **Skynet Host Added**: Added "skynet" to all 4 host enums in Claude tool definitions
+- **Skynet SSH Configuration**: Added `SSH_SKYNET_HOST=<management-host-ip>` and `SSH_SKYNET_USER=t1` to `.env` and `docker-compose.yml`
+- **Command Timeout Increased**: Raised `COMMAND_EXECUTION_TIMEOUT` from 60 to 300 seconds for backup scripts
+- **Self-Protection Pattern Fixed**: Changed broad `.*skynet` pattern to specific `skynet\.service` to allow `skynet-backup.service` restarts
+- **Discord Instance Display**: BackupStale alerts now show system name instead of "nexus:9100" in Discord notifications
+
+---
+
 ## [3.8.0] - 2025-12-01
 
 ### Phase 4: Self-Sufficiency Roadmap - Polish & Scale

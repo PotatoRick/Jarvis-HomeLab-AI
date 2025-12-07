@@ -4,7 +4,9 @@ Loads settings from environment variables with validation.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator, model_validator
 from typing import Optional
+import re
 
 
 class Settings(BaseSettings):
@@ -12,7 +14,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "AI Remediation Service"
-    app_version: str = "3.8.0"
+    app_version: str = "3.9.1"
     debug: bool = False
 
     # API Server
@@ -104,11 +106,109 @@ class Settings(BaseSettings):
     cert_expiry_warning_days: int = 30  # Warn if cert expires in <30 days
     memory_leak_threshold_mb_per_hour: float = 5.0  # Memory growth rate threshold
 
+    # Phase 5: Self-preservation settings
+    # External URL for n8n to callback to Jarvis (must be reachable from n8n host)
+    # Defaults to ssh_skynet_host:port but should be set explicitly in production
+    jarvis_external_url: Optional[str] = None  # e.g., "http://<management-host-ip>:8000"
+    self_restart_timeout_minutes: int = 10  # Max time for n8n to poll before timeout
+    stale_handoff_cleanup_minutes: int = 30  # Auto-cleanup handoffs older than this
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
+
+    # =========================================================================
+    # HIGH-007 FIX: Pydantic validators for Phase 5 configuration
+    # =========================================================================
+
+    @field_validator('jarvis_external_url')
+    @classmethod
+    def validate_jarvis_external_url(cls, v: Optional[str]) -> Optional[str]:
+        """
+        HIGH-001 FIX: Validate JARVIS_EXTERNAL_URL format.
+
+        Must be a valid HTTP(S) URL and cannot contain 'localhost' since
+        n8n runs on Outpost and needs to reach Jarvis on Skynet.
+        """
+        if v is None:
+            return v
+
+        # Check URL format
+        url_pattern = re.compile(
+            r'^https?://'  # http:// or https://
+            r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain
+            r'localhost|'  # localhost (will warn)
+            r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # IP
+            r'(?::\d+)?'  # optional port
+            r'(?:/?|[/?]\S+)$', re.IGNORECASE
+        )
+
+        if not url_pattern.match(v):
+            raise ValueError(
+                f"JARVIS_EXTERNAL_URL must be a valid HTTP(S) URL, got: {v}"
+            )
+
+        # Warn about localhost (n8n on Outpost can't reach localhost)
+        # Don't error - might be valid in development
+        if 'localhost' in v.lower() or '127.0.0.1' in v:
+            import warnings
+            warnings.warn(
+                f"JARVIS_EXTERNAL_URL contains 'localhost' ({v}). "
+                "This will not work if n8n runs on a different host. "
+                "Set to Jarvis's reachable IP (e.g., http://<management-host-ip>:8000).",
+                UserWarning
+            )
+
+        return v
+
+    @field_validator('stale_handoff_cleanup_minutes')
+    @classmethod
+    def validate_stale_handoff_cleanup(cls, v: int) -> int:
+        """
+        Validate cleanup minutes is within reasonable bounds.
+
+        Too small: Could clean up legitimate handoffs during slow restarts
+        Too large: Old handoffs accumulate and block new restarts
+        """
+        if v < 10:
+            raise ValueError(
+                f"stale_handoff_cleanup_minutes must be at least 10, got: {v}. "
+                "Values below 10 risk cleaning up legitimate in-progress handoffs."
+            )
+        if v > 1440:  # 24 hours
+            raise ValueError(
+                f"stale_handoff_cleanup_minutes must be at most 1440 (24h), got: {v}. "
+                "Very long cleanup periods could cause issues."
+            )
+        return v
+
+    @field_validator('self_restart_timeout_minutes')
+    @classmethod
+    def validate_self_restart_timeout(cls, v: int) -> int:
+        """Validate restart timeout is reasonable."""
+        if v < 2:
+            raise ValueError(
+                f"self_restart_timeout_minutes must be at least 2, got: {v}. "
+                "Restarts need time to complete."
+            )
+        if v > 60:
+            raise ValueError(
+                f"self_restart_timeout_minutes must be at most 60, got: {v}. "
+                "Very long timeouts suggest a problem with the restart."
+            )
+        return v
+
+    @field_validator('n8n_url')
+    @classmethod
+    def validate_n8n_url(cls, v: str) -> str:
+        """Validate n8n URL format."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError(
+                f"n8n_url must start with http:// or https://, got: {v}"
+            )
+        return v.rstrip('/')  # Normalize: remove trailing slash
 
 
 # Global settings instance

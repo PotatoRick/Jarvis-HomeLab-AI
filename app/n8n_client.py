@@ -381,6 +381,29 @@ class N8NClient:
                         params=data or {}
                     )
 
+                # HIGH-003 FIX: Differentiate error types for better debugging
+                if response.status_code == 404:
+                    return {
+                        "success": False,
+                        "status_code": response.status_code,
+                        "error": "workflow_not_found",
+                        "detail": f"Webhook path '{webhook_path}' not found - ensure n8n workflow is active and webhook URL is correct"
+                    }
+                elif response.status_code >= 500:
+                    return {
+                        "success": False,
+                        "status_code": response.status_code,
+                        "error": "n8n_server_error",
+                        "detail": f"n8n server error ({response.status_code}) - may be temporary, check n8n logs"
+                    }
+                elif response.status_code >= 400:
+                    return {
+                        "success": False,
+                        "status_code": response.status_code,
+                        "error": "n8n_client_error",
+                        "detail": f"n8n rejected request ({response.status_code}): {response.text[:200]}"
+                    }
+
                 return {
                     "success": response.status_code in (200, 201, 202),
                     "status_code": response.status_code,
@@ -396,6 +419,106 @@ class N8NClient:
             return {"success": False, "error": str(e)}
 
 
+    async def check_webhook_exists(self, webhook_path: str) -> Dict[str, Any]:
+        """
+        CRITICAL-002 FIX: Check if a webhook URL is responding.
+
+        This validates that the n8n workflow with the webhook is active.
+        Note: We can't know if the workflow exists without triggering it,
+        but we can check if n8n is responding to the webhook path.
+
+        Args:
+            webhook_path: Webhook path to check (e.g., "/webhook/jarvis-self-restart")
+
+        Returns:
+            Dict with exists status and any errors
+        """
+        try:
+            url = f"{self.base_url}{webhook_path}"
+
+            # Use HEAD or GET with test=true to probe the endpoint
+            # n8n webhooks respond to HEAD requests when active
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Try OPTIONS request first (less intrusive)
+                response = await client.options(url)
+
+                # If OPTIONS fails, try HEAD
+                if response.status_code == 405:  # Method not allowed
+                    response = await client.head(url)
+
+                # n8n returns different codes based on webhook state:
+                # - 200/404 when webhook exists and is active
+                # - 404 when webhook doesn't exist
+                # - 502/503 when n8n is down
+                if response.status_code in (200, 201, 202, 204, 405):
+                    return {
+                        "exists": True,
+                        "url": url,
+                        "status_code": response.status_code
+                    }
+                elif response.status_code == 404:
+                    return {
+                        "exists": False,
+                        "url": url,
+                        "error": "Webhook not found - workflow may not exist or is not active",
+                        "status_code": response.status_code
+                    }
+                else:
+                    return {
+                        "exists": False,
+                        "url": url,
+                        "error": f"Unexpected status code: {response.status_code}",
+                        "status_code": response.status_code
+                    }
+
+        except httpx.ConnectError as e:
+            return {
+                "exists": False,
+                "url": f"{self.base_url}{webhook_path}",
+                "error": f"Cannot connect to n8n: {str(e)}"
+            }
+        except Exception as e:
+            return {
+                "exists": False,
+                "url": f"{self.base_url}{webhook_path}",
+                "error": str(e)
+            }
+
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Check n8n API health.
+
+        Returns:
+            Dict with health status
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Try the n8n health endpoint
+                response = await client.get(
+                    f"{self.base_url}/healthz",
+                    headers=self.headers
+                )
+
+                if response.status_code == 200:
+                    return {"healthy": True, "status_code": 200}
+
+                # Fallback: try workflows endpoint (requires API key)
+                if self.api_key:
+                    response = await client.get(
+                        f"{self.base_url}/api/v1/workflows",
+                        headers=self.headers
+                    )
+                    return {
+                        "healthy": response.status_code == 200,
+                        "status_code": response.status_code
+                    }
+
+                return {"healthy": False, "status_code": response.status_code}
+
+        except Exception as e:
+            return {"healthy": False, "error": str(e)}
+
+
 # Global n8n client instance
 n8n_client: Optional[N8NClient] = None
 
@@ -409,10 +532,14 @@ def init_n8n_client() -> Optional[N8NClient]:
     """
     global n8n_client
 
-    # Check if n8n is configured
-    if not hasattr(settings, 'n8n_api_key') or not settings.n8n_api_key:
-        logger.warning("n8n_client_not_configured", reason="N8N_API_KEY not set")
+    # Check if n8n URL is configured
+    if not hasattr(settings, 'n8n_url') or not settings.n8n_url:
+        logger.warning("n8n_client_not_configured", reason="N8N_URL not set")
         return None
+
+    # API key is optional - webhooks work without it
+    if not hasattr(settings, 'n8n_api_key') or not settings.n8n_api_key:
+        logger.info("n8n_client_webhook_only", reason="N8N_API_KEY not set, webhook-only mode")
 
     n8n_client = N8NClient()
     logger.info("n8n_client_initialized", base_url=settings.n8n_url)

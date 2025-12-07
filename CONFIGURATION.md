@@ -17,7 +17,7 @@ PostgreSQL connection string for attempt tracking and logging.
 
 **Example:**
 ```bash
-DATABASE_URL=postgresql://n8n:8Ws2WZpaUtiZAiWN%2Foj4gKejAE%2B4YqUj@72.60.163.242:5432/finance_db
+DATABASE_URL=postgresql://n8n:8Ws2WZpaUtiZAiWN%2Foj4gKejAE%2B4YqUj@<vps-ip>:5432/finance_db
 ```
 
 **Notes:**
@@ -42,7 +42,7 @@ API key for Claude AI from Anthropic console.
 
 **Example:**
 ```bash
-ANTHROPIC_API_KEY=sk-ant-api03-YOUR-KEY-HERE
+ANTHROPIC_API_KEY=sk-ant-api03-YOUR-API-KEY-HERE
 ```
 
 **Notes:**
@@ -84,11 +84,11 @@ CLAUDE_MODEL=claude-3-5-haiku-20241022
 #### `SSH_NEXUS_HOST` (required)
 IP address or hostname of Nexus server (service host).
 
-**Default:** `192.168.0.11`
+**Default:** `<service-host-ip>`
 
 **Example:**
 ```bash
-SSH_NEXUS_HOST=192.168.0.11
+SSH_NEXUS_HOST=<service-host-ip>
 ```
 
 #### `SSH_NEXUS_USER` (required)
@@ -131,11 +131,11 @@ chmod 600 ./ssh_key
 #### `SSH_HOMEASSISTANT_HOST` (required)
 IP address of Home Assistant system.
 
-**Default:** `192.168.0.10`
+**Default:** `<ha-ip>`
 
 **Example:**
 ```bash
-SSH_HOMEASSISTANT_HOST=192.168.0.10
+SSH_HOMEASSISTANT_HOST=<ha-ip>
 ```
 
 #### `SSH_HOMEASSISTANT_USER` (required)
@@ -151,11 +151,11 @@ SSH_HOMEASSISTANT_USER=jordan
 #### `SSH_OUTPOST_HOST` (required)
 IP address or hostname of Outpost VPS.
 
-**Default:** `72.60.163.242`
+**Default:** `<vps-ip>`
 
 **Example:**
 ```bash
-SSH_OUTPOST_HOST=72.60.163.242
+SSH_OUTPOST_HOST=<vps-ip>
 ```
 
 #### `SSH_OUTPOST_USER` (required)
@@ -476,7 +476,7 @@ curl http://localhost:8000/health
 
 ### Receiver Configuration
 
-**File:** `/home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml` (on Nexus)
+**File:** `/home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml` (on Nexus)
 
 #### Basic Receiver
 ```yaml
@@ -773,7 +773,7 @@ ls -la ./ssh_key  # Should be 600
 chmod 600 ./ssh_key
 
 # Test key manually
-ssh -i ./ssh_key jordan@192.168.0.11 'echo test'
+ssh -i ./ssh_key jordan@<service-host-ip> 'echo test'
 
 # Verify key is authorized on host
 ssh nexus 'cat ~/.ssh/authorized_keys | grep -F "$(cat ~/.ssh/homelab_ed25519.pub)"'

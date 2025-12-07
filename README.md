@@ -19,7 +19,7 @@ Jarvis monitors Prometheus alerts and automatically remediates common service fa
 
 1. **Clone and configure:**
    ```bash
-   cd /home/t1/homelab/projects/ai-remediation-service
+   cd /home/<user>/homelab/projects/ai-remediation-service
    cp .env.example .env
    # Edit .env with your credentials
    ```
@@ -71,12 +71,13 @@ route:
 
 ### Core Capabilities
 - **Autonomous Remediation**: Analyzes alerts and executes corrective commands automatically
-- **Multi-Host Support**: SSH into Nexus, Home Assistant, or Outpost to fix issues
+- **Multi-Host Support**: SSH into Nexus, Home Assistant, Outpost, or Skynet to fix issues
 - **Smart Command Validation**: Blacklist-only safety checks prevent destructive actions
 - **Attempt Tracking**: 2-hour rolling window with configurable max attempts
 - **Container-Specific Tracking**: Separate attempt counters for each container
 - **Diagnostic Command Filtering**: Only state-changing commands count toward attempts
-- **Self-Protection**: Cannot stop/restart itself or critical dependencies
+- **Self-Preservation Mechanism (v3.9.0)**: Can safely restart itself or dependencies via n8n orchestration
+- **Context Continuation**: Automatically resumes interrupted remediations after restart
 - **SSH Connection Pooling**: Reuses connections for 96% faster execution
 - **Discord Notifications**: Real-time alerts for successes, failures, and escalations
 
@@ -136,9 +137,9 @@ See [CONFIGURATION.md](./CONFIGURATION.md) for complete reference.
 ### SSH Hosts
 
 Configure three hosts in `.env`:
-- `SSH_NEXUS_HOST=192.168.0.11` (service host)
-- `SSH_HOMEASSISTANT_HOST=192.168.0.10` (automation hub)
-- `SSH_OUTPOST_HOST=72.60.163.242` (cloud gateway)
+- `SSH_NEXUS_HOST=<service-host-ip>` (service host)
+- `SSH_HOMEASSISTANT_HOST=<ha-ip>` (automation hub)
+- `SSH_OUTPOST_HOST=<vps-ip>` (cloud gateway)
 
 ---
 
@@ -161,12 +162,40 @@ Jarvis uses a **permissive validation approach**: all commands are allowed unles
 - Log inspection (`docker logs`, `journalctl`)
 - Health checks (`curl`, `ping`, `nc`)
 
-### Self-Protection
+### Self-Protection & Self-Preservation
 
-Jarvis cannot execute commands that would:
-- Stop or restart the `jarvis` container
-- Stop or restart `n8n-db` (its database)
-- Reboot or stop Skynet services (the host it runs on)
+**Blocked direct execution** (use self-preservation API instead):
+- Restarting the `jarvis` container
+- Restarting `postgres-jarvis` (its database)
+- Restarting Docker daemon
+- Rebooting Skynet host
+
+**Self-Preservation Mechanism (v3.9.0):**
+When Jarvis needs to restart itself or dependencies, it safely hands off to n8n:
+1. Saves current remediation state to database
+2. Triggers n8n workflow via webhook
+3. n8n executes restart command via SSH
+4. n8n polls health endpoint until Jarvis is responsive
+5. n8n calls `/resume` to signal completion
+6. Jarvis automatically continues interrupted work
+
+**Protected Restart Targets:**
+- `jarvis` - Restart Jarvis container
+- `postgres-jarvis` - Restart database + Jarvis
+- `docker-daemon` - Restart Docker service
+- `skynet-host` - Reboot Skynet host
+
+**API:**
+```bash
+# Initiate safe self-restart
+curl -X POST "http://localhost:8000/self-restart?target=jarvis&reason=Memory+leak" \
+  -u "alertmanager:$WEBHOOK_AUTH_PASSWORD"
+
+# Check status
+curl http://localhost:8000/self-restart/status
+```
+
+See [CLAUDE.md](./CLAUDE.md#self-preservation-mechanism-phase-5) for complete documentation.
 
 ---
 
@@ -249,7 +278,7 @@ curl -X POST http://localhost:8000/webhook \
 **SSH connection failures:**
 ```bash
 # Test SSH key manually
-ssh -i ./ssh_key jordan@192.168.0.11 'docker ps'
+ssh -i ./ssh_key jordan@<service-host-ip> 'docker ps'
 
 # Check SSH key permissions
 ls -la ./ssh_key  # Should be 600
@@ -345,7 +374,7 @@ For production deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md)
 
 **Quick deployment on Outpost (Skynet):**
 ```bash
-cd /home/t1/homelab/projects/ai-remediation-service
+cd /home/<user>/homelab/projects/ai-remediation-service
 git pull origin main
 docker compose down
 docker compose build
@@ -357,25 +386,27 @@ docker logs -f jarvis
 
 ## Changelog
 
-### November 11, 2025 - Bug Fixes
-- **Discord Username Fix**: Changed notification username from "Homelab SRE" to "Jarvis" for consistent branding
-- **Notification Parameter Fix**: Fixed `NameError` in success notifications - now correctly passes `max_attempts` parameter
-- **Container Instance Detection**: Improved logic to detect when Prometheus already formatted instance as "host:container"
-- **Alertmanager Timing**: Optimized `group_interval` from 10s to 1m to prevent duplicate webhook spam while maintaining retry capability
+See [CHANGELOG.md](./CHANGELOG.md) for complete version history.
 
-### November 11, 2025 - Major Upgrades
-- **SSH Connection Pooling**: 96% faster execution (1 connection + reuses vs 24 new connections)
-- **Blacklist-Only Validation**: Removed whitelist, allow all non-destructive commands
-- **Self-Protection**: Cannot stop jarvis, n8n-db, or Skynet services
-- **Increased Attempts**: 3 → 20 max attempts before escalation
-- **Shortened Window**: 24 hours → 2 hours for attempt tracking
-- **Cost Optimization**: Switched to Haiku 3.5 (73% cost savings)
-- **Service Rename**: "AI Remediation Service" → "Jarvis"
-- **Diagnostic Filtering**: Only actionable commands count toward attempts
-- **Container-Specific Tracking**: Independent counters for each container
-- **Resolution Cleanup**: Attempt history cleared when alerts resolve
+### December 7, 2025 - v3.9.0 Phase 5: Self-Preservation
+- **Self-Restart Capability**: Jarvis can safely restart itself or dependencies via n8n orchestration
+- **Context Preservation**: Saves remediation state before restart and continues afterward
+- **n8n Handoff Workflow**: External orchestration handles restart polling and callback
+- **Protected Targets**: jarvis, postgres-jarvis, docker-daemon, skynet-host
+- **Stale Handoff Cleanup**: Automatic cleanup of abandoned handoffs on startup
+- **New Endpoints**: `/self-restart`, `/resume`, `/self-restart/status`, `/self-restart/cancel`
 
-For detailed fix history, see [documentation/historical/](./documentation/historical/)
+### December 6, 2025 - v3.8.1 BackupStale Multi-System Fix
+- **System-Aware Routing**: BackupStale alerts now correctly route to the right host
+- **Enhanced Frigate Monitoring**: Database corruption detection via events API staleness
+- **Backup Pattern Fixes**: Corrected all 4 BackupStale patterns with proper script paths
+
+### December 1, 2025 - v3.8.0 Phase 4: Polish
+- **Prometheus Metrics Export**: Self-monitoring via `/metrics` endpoint
+- **Runbook Integration**: Structured remediation guidance for Claude
+- **Sample Runbooks**: ContainerDown, WireGuardVPNDown, DiskSpaceLow, HighMemoryUsage, BackupStale
+
+For detailed fix history, see [CHANGELOG.md](./CHANGELOG.md) and [documentation/historical/](./documentation/historical/)
 
 ---
 
@@ -386,10 +417,10 @@ For detailed fix history, see [documentation/historical/](./documentation/histor
 **Logs & Monitoring:**
 - Jarvis logs: `docker logs jarvis`
 - Discord: Real-time notifications
-- Prometheus: http://prometheus.theburrow.casa
-- Grafana: http://grafana.theburrow.casa
+- Prometheus: http://prometheus.yourdomain.com
+- Grafana: http://grafana.yourdomain.com
 
-**Repository:** `/home/t1/homelab/projects/ai-remediation-service/`
+**Repository:** `/home/<user>/homelab/projects/ai-remediation-service/`
 
 ---
 

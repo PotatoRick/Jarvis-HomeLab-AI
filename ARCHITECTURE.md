@@ -148,9 +148,9 @@ count = await conn.fetchval(query, alert_name, alert_instance, window_hours)
 You are an experienced SRE managing The Burrow homelab infrastructure.
 
 # System Context
-- Nexus (192.168.0.11): Service host (Docker containers)
-- Home Assistant (192.168.0.10): Automation hub
-- Outpost (72.60.163.242): Cloud gateway (VPS)
+- Nexus (<service-host-ip>): Service host (Docker containers)
+- Home Assistant (<ha-ip>): Automation hub
+- Outpost (<vps-ip>): Cloud gateway (VPS)
 
 # Your Task
 Analyze the alert and provide remediation commands.
@@ -252,7 +252,7 @@ async def _get_connection(self, host):
 ```python
 SSH_HOSTS = {
     SSHHost.NEXUS: {
-        "host": "192.168.0.11",
+        "host": "<service-host-ip>",
         "username": "jordan",
         "known_hosts": None,  # Disable strict host checking
         "client_keys": ["/app/ssh_key"]

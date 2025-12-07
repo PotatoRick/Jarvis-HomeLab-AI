@@ -70,6 +70,19 @@ n8n_workflow_executions = Counter(
     ['workflow_name', 'status']  # status: success, failure, timeout
 )
 
+# Phase 5: Self-preservation metrics
+self_restarts = Counter(
+    'jarvis_self_restarts_total',
+    'Self-restart operations initiated',
+    ['target', 'status']  # target: jarvis, postgres-jarvis, docker-daemon, skynet-host; status: success, failure, timeout, cancelled
+)
+
+self_restart_failures = Counter(
+    'jarvis_self_restart_failures_total',
+    'Failed self-restart operations by reason',
+    ['target', 'failure_reason']  # failure_reason: n8n_trigger_failed, handoff_save_failed, resume_failed, timeout
+)
+
 
 # =============================================================================
 # Histograms - Distribution of values (duration, latency)
@@ -100,6 +113,13 @@ verification_duration = Histogram(
     'jarvis_verification_duration_seconds',
     'Alert verification polling duration',
     buckets=[10, 20, 30, 60, 90, 120]
+)
+
+self_restart_duration = Histogram(
+    'jarvis_self_restart_duration_seconds',
+    'Time from self-restart initiation to resume',
+    ['target'],
+    buckets=[10, 20, 30, 45, 60, 90, 120, 180, 300, 600]
 )
 
 
@@ -148,6 +168,11 @@ ssh_pool_connections = Gauge(
     'jarvis_ssh_pool_connections',
     'Active SSH connections in pool',
     ['host']
+)
+
+self_restart_active = Gauge(
+    'jarvis_self_restart_active',
+    'Currently active self-restart handoff (1 = in progress, 0 = none)'
 )
 
 
@@ -245,6 +270,37 @@ def record_n8n_execution(workflow_name: str, status: str):
     n8n_workflow_executions.labels(workflow_name=workflow_name, status=status).inc()
 
 
+def record_self_restart(target: str, status: str, duration_seconds: float = None):
+    """
+    Record a self-restart operation.
+
+    Args:
+        target: What was restarted (jarvis, postgres-jarvis, docker-daemon, skynet-host)
+        status: Outcome (success, failure, timeout, cancelled)
+        duration_seconds: Time from initiation to completion
+    """
+    self_restarts.labels(target=target, status=status).inc()
+
+    if duration_seconds is not None and status == 'success':
+        self_restart_duration.labels(target=target).observe(duration_seconds)
+
+
+def record_self_restart_failure(target: str, reason: str):
+    """
+    Record a self-restart failure with specific reason.
+
+    Args:
+        target: What was being restarted
+        reason: Why it failed (n8n_trigger_failed, handoff_save_failed, resume_failed, timeout)
+    """
+    self_restart_failures.labels(target=target, failure_reason=reason).inc()
+
+
+def set_self_restart_active(active: bool):
+    """Set whether a self-restart is currently in progress."""
+    self_restart_active.set(1 if active else 0)
+
+
 def update_active_remediations(delta: int):
     """Update active remediation count (+1 for start, -1 for end)."""
     if delta > 0:
@@ -327,6 +383,7 @@ def init_metrics(version: str):
     set_database_status(False)
     set_maintenance_mode(False)
     set_proactive_monitor_status(False)
+    set_self_restart_active(False)
     active_remediations.set(0)
     queue_depth.set(0)
 

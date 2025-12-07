@@ -27,6 +27,96 @@ class ClaudeAgent:
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         self.logger = logger.bind(component="claude_agent")
 
+        # Track current remediation context for self-restart handoff (Phase 5)
+        self._current_context: Optional[Dict[str, Any]] = None
+
+    def set_remediation_context(
+        self,
+        alert_name: str,
+        alert_instance: str,
+        alert_fingerprint: str,
+        severity: str,
+        attempt_number: int,
+        target_host: str,
+        service_name: Optional[str] = None,
+        service_type: Optional[str] = None,
+        hints: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Set the current remediation context for potential self-restart handoff.
+
+        Called before starting analyze_alert_with_tools so context can be
+        captured if a self-restart is triggered mid-remediation.
+
+        Args:
+            alert_name: Name of the alert being processed
+            alert_instance: Instance identifier
+            alert_fingerprint: Unique alert fingerprint
+            severity: Alert severity level
+            attempt_number: Current attempt number
+            target_host: Target host for remediation
+            service_name: Service being remediated
+            service_type: Type of service (docker, systemd, etc.)
+            hints: Extracted hints from alert
+        """
+        self._current_context = {
+            "alert_name": alert_name,
+            "alert_instance": alert_instance,
+            "alert_fingerprint": alert_fingerprint,
+            "severity": severity,
+            "attempt_number": attempt_number,
+            "target_host": target_host,
+            "service_name": service_name,
+            "service_type": service_type,
+            "hints": hints,
+            "commands_executed": [],
+            "command_outputs": [],
+            "diagnostic_info": {},
+            "ai_analysis": None,
+            "ai_reasoning": None,
+            "planned_commands": [],
+        }
+        self.logger.debug(
+            "remediation_context_set",
+            alert_name=alert_name,
+            target_host=target_host
+        )
+
+    def update_context_commands(
+        self,
+        command: str,
+        output: str,
+        success: bool
+    ) -> None:
+        """Update context with executed command results."""
+        if self._current_context:
+            self._current_context["commands_executed"].append(command)
+            self._current_context["command_outputs"].append(output)
+            self._current_context["diagnostic_info"][f"cmd_{len(self._current_context['commands_executed'])}"] = {
+                "command": command,
+                "success": success
+            }
+
+    def update_context_analysis(
+        self,
+        analysis: str,
+        reasoning: str,
+        planned_commands: List[str]
+    ) -> None:
+        """Update context with AI analysis results."""
+        if self._current_context:
+            self._current_context["ai_analysis"] = analysis
+            self._current_context["ai_reasoning"] = reasoning
+            self._current_context["planned_commands"] = planned_commands
+
+    def get_remediation_context(self) -> Optional[Dict[str, Any]]:
+        """Get the current remediation context for handoff."""
+        return self._current_context
+
+    def clear_remediation_context(self) -> None:
+        """Clear the current remediation context after completion."""
+        self._current_context = None
+
     def _get_tools_definition(self) -> List[Dict[str, Any]]:
         """
         Define tools available to Claude for remediation.
@@ -43,7 +133,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost"],
+                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
                             "description": "Which system to gather logs from"
                         },
                         "service_type": {
@@ -72,7 +162,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost"],
+                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
                             "description": "Which system to check"
                         },
                         "service_name": {
@@ -97,7 +187,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost"],
+                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
                             "description": "Which system the service is on"
                         },
                         "service_type": {
@@ -121,7 +211,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost"],
+                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
                             "description": "Which system to execute on"
                         },
                         "command": {
@@ -178,7 +268,7 @@ class ClaudeAgent:
                         "predict_exhaustion": {
                             "type": "boolean",
                             "description": "If true, predict when metric will hit zero (useful for disk/memory)",
-                            "default": false
+                            "default": False
                         }
                     },
                     "required": ["metric", "instance"]
@@ -238,7 +328,7 @@ class ClaudeAgent:
                         "wait_for_completion": {
                             "type": "boolean",
                             "description": "If true, wait for workflow to complete (default: true)",
-                            "default": true
+                            "default": True
                         }
                     },
                     "required": ["workflow_name"]
@@ -251,6 +341,25 @@ class ClaudeAgent:
                     "type": "object",
                     "properties": {},
                     "required": []
+                }
+            },
+            {
+                "name": "initiate_self_restart",
+                "description": "Initiate a safe self-restart of Jarvis or its dependencies via n8n handoff. ONLY use this when you've determined that Jarvis itself, its database (postgres-jarvis), or the Docker daemon needs to be restarted to resolve an issue. This is the ONLY safe way to restart these components - direct restart commands are blocked. The restart is orchestrated by n8n which will: 1) Save current state, 2) Execute restart, 3) Poll until healthy, 4) Resume any interrupted work. Valid targets: jarvis, postgres-jarvis, docker-daemon, skynet-host.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["jarvis", "postgres-jarvis", "docker-daemon", "skynet-host"],
+                            "description": "What to restart: jarvis (the AI remediation container), postgres-jarvis (Jarvis database), docker-daemon (Docker service on Skynet), skynet-host (full host reboot - use with extreme caution)"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Explanation of why this restart is needed (for audit trail)"
+                        }
+                    },
+                    "required": ["target", "reason"]
                 }
             }
         ]
@@ -349,9 +458,13 @@ class ClaudeAgent:
                     commands=[command]
                 )
 
+                # Phase 5: Track command execution for potential self-restart handoff
+                output = result.outputs[0] if result.outputs else ""
+                self.update_context_commands(command, output, result.success)
+
                 return {
                     "success": result.success,
-                    "output": result.outputs[0] if result.outputs else "",
+                    "output": output,
                     "exit_code": result.exit_codes[0] if result.exit_codes else -1
                 }
 
@@ -363,9 +476,13 @@ class ClaudeAgent:
                     commands=[command]
                 )
 
+                # Phase 5: Track command execution for potential self-restart handoff
+                output = result.outputs[0] if result.outputs else ""
+                self.update_context_commands(command, output, result.success)
+
                 return {
                     "success": result.success,
-                    "output": result.outputs[0] if result.outputs else "",
+                    "output": output,
                     "exit_code": result.exit_codes[0] if result.exit_codes else -1
                 }
 
@@ -572,6 +689,97 @@ class ClaudeAgent:
                         "error": f"n8n workflow list failed: {str(e)}"
                     }
 
+            elif tool_name == "initiate_self_restart":
+                # Phase 5: Self-preservation - safe self-restart via n8n handoff
+                from .self_preservation import get_self_preservation_manager, SelfRestartTarget, RemediationContext
+
+                target = tool_input.get("target")
+                reason = tool_input.get("reason")
+
+                if not target:
+                    return {
+                        "success": False,
+                        "error": "target is required"
+                    }
+
+                if not reason:
+                    return {
+                        "success": False,
+                        "error": "reason is required"
+                    }
+
+                # Validate target
+                try:
+                    restart_target = SelfRestartTarget(target)
+                except ValueError:
+                    valid_targets = [t.value for t in SelfRestartTarget]
+                    return {
+                        "success": False,
+                        "error": f"Invalid target '{target}'. Valid targets: {valid_targets}"
+                    }
+
+                sp_mgr = get_self_preservation_manager()
+                if sp_mgr is None:
+                    return {
+                        "success": False,
+                        "error": "Self-preservation manager not initialized"
+                    }
+
+                # Build remediation context from current state (Phase 5 enhancement)
+                remediation_ctx = None
+                if self._current_context:
+                    try:
+                        remediation_ctx = RemediationContext(
+                            alert_name=self._current_context.get("alert_name", "unknown"),
+                            alert_instance=self._current_context.get("alert_instance", "unknown"),
+                            alert_fingerprint=self._current_context.get("alert_fingerprint", "unknown"),
+                            severity=self._current_context.get("severity", "warning"),
+                            attempt_number=self._current_context.get("attempt_number", 1),
+                            commands_executed=self._current_context.get("commands_executed", []),
+                            command_outputs=self._current_context.get("command_outputs", []),
+                            diagnostic_info=self._current_context.get("diagnostic_info", {}),
+                            ai_analysis=self._current_context.get("ai_analysis"),
+                            ai_reasoning=self._current_context.get("ai_reasoning"),
+                            planned_commands=self._current_context.get("planned_commands", []),
+                            target_host=self._current_context.get("target_host", "unknown"),
+                            service_name=self._current_context.get("service_name"),
+                            service_type=self._current_context.get("service_type"),
+                        )
+                        self.logger.info(
+                            "remediation_context_passed_to_self_restart",
+                            alert_name=remediation_ctx.alert_name,
+                            commands_executed=len(remediation_ctx.commands_executed)
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            "remediation_context_build_failed",
+                            error=str(e)
+                        )
+                        # Continue without context - better than failing
+
+                try:
+                    result = await sp_mgr.initiate_self_restart(
+                        target=restart_target,
+                        reason=reason,
+                        remediation_context=remediation_ctx  # Pass context for continuation after restart
+                    )
+
+                    if result.get("success"):
+                        return {
+                            "success": True,
+                            "handoff_id": result.get("handoff_id"),
+                            "message": f"Self-restart initiated for {target}. n8n will orchestrate the restart and resume.",
+                            "note": "Jarvis will be temporarily unavailable during restart."
+                        }
+                    else:
+                        return result
+
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"Self-restart initiation failed: {str(e)}"
+                    }
+
             else:
                 return {
                     "success": False,
@@ -656,16 +864,40 @@ The commands you list should reflect what you've already done via tools, or what
         system_context_section = f"# System Context\n{system_context}" if system_context else ""
         runbook_section = f"\n{runbook_context}" if runbook_context else ""
 
+        # v3.8.1: Include hints in the prompt for system-specific remediation
+        hints_section = ""
+        if hints:
+            hints_lines = []
+            if hints.get("system"):
+                hints_lines.append(f"- **System:** {hints['system']}")
+            if hints.get("target_host"):
+                hints_lines.append(f"- **Target Host:** {hints['target_host']}")
+            if hints.get("system_specific_command"):
+                hints_lines.append(f"- **Recommended Command:** `{hints['system_specific_command']}`")
+            if hints.get("remediation_hint"):
+                hints_lines.append(f"- **Remediation Hint:** {hints['remediation_hint']}")
+            if hints.get("suggested_remediation"):
+                hints_lines.append(f"- **Suggested Remediation:** {hints['suggested_remediation']}")
+            if hints_lines:
+                hints_section = "# Remediation Hints\n" + "\n".join(hints_lines)
+                self.logger.info(
+                    "hints_included_in_prompt",
+                    alert_name=alert_name,
+                    hints_count=len(hints_lines),
+                    has_system_specific_command=bool(hints.get("system_specific_command"))
+                )
+
         user_prompt = f"""# Alert Details
 - **Alert Name:** {alert_name}
 - **Instance:** {alert_instance}
 - **Severity:** {severity}
 - **Description:** {description}
 
+{hints_section}
 {system_context_section}
 {runbook_section}
 
-Please diagnose this alert and attempt remediation. Use your tools first, then provide your final analysis."""
+Please diagnose this alert and attempt remediation. If a **Recommended Command** is provided above, use that exact command. Use your tools first, then provide your final analysis."""
 
         messages = [{"role": "user", "content": user_prompt}]
         tools = self._get_tools_definition()
@@ -748,6 +980,13 @@ Please diagnose this alert and attempt remediation. Use your tools first, then p
                     # If commands are empty and we executed some via tools, use those
                     if not analysis.commands and executed_commands:
                         analysis.commands = executed_commands
+
+                    # Phase 5: Update context with analysis for potential self-restart handoff
+                    self.update_context_analysis(
+                        analysis=analysis.analysis,
+                        reasoning=analysis.reasoning,
+                        planned_commands=analysis.commands
+                    )
 
                     self.logger.info(
                         "claude_analysis_completed",

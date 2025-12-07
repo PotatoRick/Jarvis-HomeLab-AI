@@ -19,7 +19,7 @@ Complete step-by-step instructions for deploying the AI remediation service to p
 
 ## Deployment Overview
 
-**Target System:** Outpost VPS (Skynet - 192.168.0.13)
+**Target System:** Outpost VPS (Skynet - <management-host-ip>)
 
 **Why Outpost/Skynet:**
 - Already hosts PostgreSQL database (n8n-db)
@@ -29,7 +29,7 @@ Complete step-by-step instructions for deploying the AI remediation service to p
 
 **Architecture:**
 ```
-Nexus (192.168.0.11)                  Skynet/Outpost (this system)
+Nexus (<service-host-ip>)                  Skynet/Outpost (this system)
 ┌────────────────────┐                ┌──────────────────────────┐
 │  Alertmanager      │───webhook────▶ │  Jarvis                  │
 │  (Prometheus)      │                │  ├─ FastAPI webhook      │
@@ -70,7 +70,7 @@ Nexus (192.168.0.11)                  Skynet/Outpost (this system)
 
 5. **Prometheus + Alertmanager**
    - Running on Nexus
-   - Accessible at: http://192.168.0.11:9093
+   - Accessible at: http://<service-host-ip>:9093
 
 ### System Requirements
 
@@ -94,7 +94,7 @@ Nexus (192.168.0.11)                  Skynet/Outpost (this system)
 
 ```bash
 # On Skynet/Outpost
-cd /home/t1/homelab/projects/ai-remediation-service
+cd /home/<user>/homelab/projects/ai-remediation-service
 
 # Verify files exist
 ls -la
@@ -119,18 +119,18 @@ nano .env
 **Required settings:**
 ```bash
 # Database
-DATABASE_URL=postgresql://n8n:YOUR_PASSWORD@72.60.163.242:5432/finance_db
+DATABASE_URL=postgresql://n8n:YOUR_PASSWORD@<vps-ip>:5432/finance_db
 
 # Claude API
 ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY_HERE
 CLAUDE_MODEL=claude-3-5-haiku-20241022
 
 # SSH Configuration (use defaults)
-SSH_NEXUS_HOST=192.168.0.11
+SSH_NEXUS_HOST=<service-host-ip>
 SSH_NEXUS_USER=jordan
-SSH_HOMEASSISTANT_HOST=192.168.0.10
+SSH_HOMEASSISTANT_HOST=<ha-ip>
 SSH_HOMEASSISTANT_USER=jordan
-SSH_OUTPOST_HOST=72.60.163.242
+SSH_OUTPOST_HOST=<vps-ip>
 SSH_OUTPOST_USER=jordan
 
 # Discord
@@ -167,8 +167,8 @@ ls -la ./ssh_key
 # Should show: -rw------- (600)
 
 # Test SSH key works
-ssh -i ./ssh_key jordan@192.168.0.11 'echo "SSH test successful"'
-ssh -i ./ssh_key jordan@192.168.0.10 'echo "SSH test successful"'
+ssh -i ./ssh_key jordan@<service-host-ip> 'echo "SSH test successful"'
+ssh -i ./ssh_key jordan@<ha-ip> 'echo "SSH test successful"'
 ```
 
 ### Step 4: Verify Database
@@ -235,7 +235,7 @@ curl http://localhost:8000/health | jq
 ssh nexus
 
 # Edit Alertmanager config
-nano /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml
+nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml
 ```
 
 **Add Jarvis receiver:**
@@ -443,7 +443,7 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
 
 ```bash
 # On Skynet/Outpost
-cd /home/t1/homelab/projects/ai-remediation-service
+cd /home/<user>/homelab/projects/ai-remediation-service
 
 # Pull latest changes
 git pull origin main
@@ -534,7 +534,7 @@ docker logs jarvis
 docker stop jarvis
 
 # Option 2: Disable in Alertmanager
-ssh nexus 'nano /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 # Comment out Jarvis route
 # Reload: docker exec alertmanager kill -HUP 1
 
@@ -624,7 +624,7 @@ docker logs jarvis | grep "alert_instance" | grep ":"
 # Should see: alert_instance=nexus:omada (not just "nexus")
 
 # 3. Confirm Alertmanager timing
-ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.yml | grep -A 3 "group_interval"'
+ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep -A 3 "group_interval"'
 # Should see: group_interval: 1m
 ```
 
@@ -632,4 +632,4 @@ ssh nexus 'cat /home/jordan/docker/home-stack/alertmanager/config/alertmanager.y
 
 **Last Updated:** November 11, 2025
 **Version:** 2.0.0
-**Deployment Target:** Outpost/Skynet (192.168.0.13)
+**Deployment Target:** Outpost/Skynet (<management-host-ip>)

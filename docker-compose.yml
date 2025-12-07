@@ -55,6 +55,11 @@ services:
       - SSH_OUTPOST_USER=${SSH_OUTPOST_USER:-root}
       - SSH_OUTPOST_KEY_PATH=/app/ssh_key
 
+      # Skynet (must NOT be localhost - Jarvis runs in Docker, not on Skynet directly)
+      - SSH_SKYNET_HOST=${SSH_SKYNET_HOST:-<management-host-ip>}
+      - SSH_SKYNET_USER=${SSH_SKYNET_USER:-t1}
+      - SSH_SKYNET_KEY_PATH=/app/ssh_key
+
       # Discord
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
       - DISCORD_ENABLED=${DISCORD_ENABLED:-true}
@@ -72,12 +77,28 @@ services:
       - ATTEMPT_WINDOW_HOURS=${ATTEMPT_WINDOW_HOURS:-24}
       - COMMAND_EXECUTION_TIMEOUT=${COMMAND_EXECUTION_TIMEOUT:-60}
 
+      # Prometheus & Loki
+      - PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+      - LOKI_URL=${LOKI_URL:-http://localhost:3100}
+
+      # Verification Settings
+      - VERIFICATION_ENABLED=${VERIFICATION_ENABLED:-true}
+      - VERIFICATION_MAX_WAIT_SECONDS=${VERIFICATION_MAX_WAIT_SECONDS:-120}
+      - VERIFICATION_POLL_INTERVAL=${VERIFICATION_POLL_INTERVAL:-10}
+
+      # n8n Integration (for self-preservation workflows)
+      - N8N_URL=${N8N_URL:-http://localhost:5678}
+      - N8N_SELF_RESTART_WEBHOOK=${N8N_SELF_RESTART_WEBHOOK:-}
+
     volumes:
       # SSH key
       - ./ssh_key:/app/ssh_key:ro
 
       # Optional: Mount config for runtime updates
       - ./app:/app/app:ro
+
+      # Runbooks for hot-reload
+      - ./runbooks:/app/runbooks:ro
 
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]

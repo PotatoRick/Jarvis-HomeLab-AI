@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS remediation_log (
     timestamp TIMESTAMP DEFAULT NOW(),
     alert_name VARCHAR(255),
     alert_instance VARCHAR(255),
+    alert_fingerprint VARCHAR(255),  -- Unique identifier from Alertmanager
     severity VARCHAR(50),
     alert_labels JSONB,
     alert_annotations JSONB,
@@ -291,32 +292,62 @@ INSERT INTO remediation_patterns (
      ARRAY['docker restart {container}'],
      0.70, 'seed', '{"typical_resolution_time": 8}'::jsonb),
 
-    -- Backup patterns (Updated: v3.2.0 with target_host)
-    -- IMPORTANT: Backup metrics are scraped from Nexus, but scripts run on Skynet!
-    ('BackupStale', 'backup', 'backup_status==0|system:homeassistant',
-     'Home Assistant backup script did not run or failed to upload to B2. Scripts are on Skynet, not Nexus.',
-     ARRAY['/home/t1/homelab/scripts/backup/backup_homeassistant_notify.sh'],
-     0.90, 'seed', '{"target_host": "skynet", "description": "Runs HA backup script on Skynet. Alert comes from Nexus metrics but fix runs on Skynet."}'::jsonb),
+    -- Prometheus/Monitoring patterns (generic TargetDown above)
+    -- Note: Backup patterns are inserted separately below with target_host column
 
-    ('BackupStale', 'backup', 'backup_status==0|system:nexus',
-     'Nexus backup script did not run or failed',
-     ARRAY['cd /home/jordan/docker/home-stack && ./backup.sh'],
-     0.85, 'seed', '{"target_host": "nexus", "description": "Runs Nexus backup script locally"}'::jsonb),
+    ('TargetDown', 'monitoring', 'prometheus_scrape_failing_generic',
+     'Prometheus cannot scrape metrics from target',
+     ARRAY['docker restart {container}'],
+     0.70, 'seed', '{"typical_resolution_time": 8}'::jsonb)
 
-    ('BackupStale', 'backup', 'backup_status==0|system:skynet',
-     'Skynet backup script did not run or failed',
-     ARRAY['/home/t1/homelab/scripts/backup/backup_skynet.sh'],
-     0.85, 'seed', '{"target_host": "skynet", "description": "Runs Skynet backup script locally"}'::jsonb),
+ON CONFLICT (alert_name, symptom_fingerprint) DO NOTHING;
 
-    ('BackupStale', 'backup', 'backup_status==0|system:outpost',
-     'Outpost backup script did not run or failed',
-     ARRAY['cd /opt/burrow && ./backup.sh'],
-     0.85, 'seed', '{"target_host": "outpost", "description": "Runs Outpost backup script locally"}'::jsonb),
+-- ============================================================================
+-- BACKUP PATTERNS: Require target_host for system-specific remediation
+-- ============================================================================
+-- IMPORTANT: Backup metrics are scraped from Nexus textfile collector, but scripts run on DIFFERENT hosts!
+-- The 'system' label in the alert tells us WHICH backup is stale, and determines where to run the fix.
+--
+-- System        | Run Fix On | Script Path
+-- --------------|------------|-------------
+-- homeassistant | skynet     | /home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh
+-- skynet        | skynet     | /home/<user>/homelab/scripts/backup/backup_skynet_notify.sh
+-- nexus         | nexus      | /home/<user>/docker/backups/backup_notify.sh
+-- outpost       | outpost    | /opt/<app>/backups/backup_vps_notify.sh
 
-    ('BackupHealthCheckStale', 'monitoring', 'backup_check_timestamp_stale',
-     'Backup health check cron job is not running on Skynet',
-     ARRAY['/home/t1/homelab/scripts/backup/check_b2_backups.sh'],
-     0.85, 'seed', '{"target_host": "skynet", "description": "Runs backup check on Skynet and pushes metrics to Nexus"}'::jsonb)
+INSERT INTO remediation_patterns (
+    alert_name, alert_category, symptom_fingerprint, root_cause,
+    solution_commands, target_host, confidence_score, created_by, metadata
+) VALUES
+    ('BackupStale', 'backup', 'BackupStale|system:homeassistant|category:backup',
+     'Home Assistant backup script did not run or failed to upload to B2. Script runs on Skynet, not Nexus.',
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh'],
+     'skynet', 0.90, 'seed',
+     '{"description": "Runs HA backup script on Skynet. Alert comes from Nexus metrics but fix runs on Skynet."}'::jsonb),
+
+    ('BackupStale', 'backup', 'BackupStale|system:nexus|category:backup',
+     'Nexus backup script did not run or failed to upload to B2.',
+     ARRAY['/home/<user>/docker/backups/backup_notify.sh'],
+     'nexus', 0.85, 'seed',
+     '{"description": "Runs Nexus backup script locally on Nexus."}'::jsonb),
+
+    ('BackupStale', 'backup', 'BackupStale|system:skynet|category:backup',
+     'Skynet backup script did not run or failed to upload to B2.',
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh'],
+     'skynet', 0.85, 'seed',
+     '{"description": "Runs Skynet backup script locally."}'::jsonb),
+
+    ('BackupStale', 'backup', 'BackupStale|system:outpost|category:backup',
+     'Outpost backup script did not run or failed to upload to B2.',
+     ARRAY['/opt/<app>/backups/backup_vps_notify.sh'],
+     'outpost', 0.85, 'seed',
+     '{"description": "Runs Outpost VPS backup script."}'::jsonb),
+
+    ('BackupHealthCheckStale', 'monitoring', 'BackupHealthCheckStale|category:monitoring',
+     'Backup health check cron job is not running on Skynet. This script checks B2 for all backups and pushes metrics to Nexus.',
+     ARRAY['/home/<user>/homelab/scripts/backup/check_b2_backups.sh'],
+     'skynet', 0.85, 'seed',
+     '{"description": "Runs backup check on Skynet and SCPs metrics to Nexus textfile collector."}'::jsonb)
 
 ON CONFLICT (alert_name, symptom_fingerprint) DO NOTHING;
 
@@ -480,6 +511,37 @@ CREATE INDEX IF NOT EXISTS idx_n8n_workflow ON n8n_executions(workflow_id);
 CREATE INDEX IF NOT EXISTS idx_n8n_execution_id ON n8n_executions(execution_id);
 CREATE INDEX IF NOT EXISTS idx_n8n_status ON n8n_executions(status);
 CREATE INDEX IF NOT EXISTS idx_n8n_time ON n8n_executions(started_at DESC);
+
+
+-- ============================================================================
+-- NEW SCHEMA: Self-Preservation Handoffs (Phase 5 - Self-Restart Capability)
+-- ============================================================================
+
+-- Track self-restart handoffs to n8n for safe restarts of Jarvis and dependencies
+-- This table MUST survive restarts since it's the source of truth for resume operations
+CREATE TABLE IF NOT EXISTS self_preservation_handoffs (
+    id SERIAL PRIMARY KEY,
+    handoff_id VARCHAR(64) NOT NULL UNIQUE,
+    restart_target VARCHAR(50) NOT NULL,          -- 'jarvis', 'postgres-jarvis', 'docker-daemon', 'skynet-host'
+    restart_reason TEXT NOT NULL,
+    remediation_context TEXT,                     -- JSON blob of serialized RemediationContext
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'in_progress', 'completed', 'failed', 'timeout', 'cancelled'
+    callback_url VARCHAR(500) NOT NULL,
+    n8n_execution_id VARCHAR(100),
+    error_message TEXT,
+    created_at VARCHAR(50) NOT NULL,              -- ISO format timestamp string
+    completed_at VARCHAR(50)                      -- ISO format timestamp string
+);
+
+CREATE INDEX IF NOT EXISTS idx_sp_handoff_id ON self_preservation_handoffs(handoff_id);
+CREATE INDEX IF NOT EXISTS idx_sp_status ON self_preservation_handoffs(status);
+CREATE INDEX IF NOT EXISTS idx_sp_created ON self_preservation_handoffs(created_at DESC);
+
+-- Only allow one pending or in-progress handoff at a time
+-- This prevents multiple concurrent self-restarts
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sp_active_handoff
+    ON self_preservation_handoffs(status)
+    WHERE status IN ('pending', 'in_progress');
 
 
 -- Grant permissions

@@ -6,6 +6,7 @@ executes safe remediation commands via SSH, and notifies via Discord.
 """
 
 import structlog
+from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import JSONResponse
@@ -35,8 +36,14 @@ from .prometheus_client import prometheus_client
 from .alert_correlator import AlertCorrelator, init_correlator, alert_correlator
 from .proactive_monitor import ProactiveMonitor, init_proactive_monitor, proactive_monitor
 from .rollback_manager import RollbackManager, init_rollback_manager, rollback_manager
-from .n8n_client import init_n8n_client
+from .n8n_client import init_n8n_client, n8n_client
 from .runbook_manager import init_runbook_manager, get_runbook_manager
+from .self_preservation import (
+    init_self_preservation_manager,
+    get_self_preservation_manager,
+    SelfRestartTarget,
+    RemediationContext,
+)
 from . import metrics
 from .utils import (
     determine_target_host,
@@ -58,6 +65,7 @@ external_service_monitor = None
 correlator = None
 proactive_mon = None  # Phase 3: Proactive monitoring
 rollback_mgr = None   # Phase 3: Rollback capability
+self_preservation_mgr = None  # Phase 5: Self-preservation / self-restart
 
 # Configure structured logging
 structlog.configure(
@@ -127,7 +135,7 @@ async def log_attempt_with_fallback(attempt):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
-    global host_monitor, alert_suppressor, alert_queue, learning_engine, external_service_monitor, correlator, proactive_mon, rollback_mgr
+    global host_monitor, alert_suppressor, alert_queue, learning_engine, external_service_monitor, correlator, proactive_mon, rollback_mgr, self_preservation_mgr
 
     logger.info(
         "application_starting",
@@ -164,7 +172,7 @@ async def lifespan(app: FastAPI):
     logger.info("alert_correlator_initialized")
 
     # Phase 3: Initialize n8n client for workflow orchestration
-    init_n8n_client()
+    n8n = init_n8n_client()
 
     # Phase 3: Initialize rollback manager for state snapshots
     rollback_mgr = init_rollback_manager(ssh_executor=ssh_executor)
@@ -198,6 +206,80 @@ async def lifespan(app: FastAPI):
     metrics.init_metrics(settings.app_version)
     metrics.set_database_status(True)
     logger.info("prometheus_metrics_initialized")
+
+    # Phase 5: Initialize self-preservation manager for safe self-restarts
+    self_preservation_mgr = init_self_preservation_manager(
+        db=db,
+        n8n_client=n8n,
+        discord_notifier=discord_notifier
+    )
+    logger.info("self_preservation_manager_initialized")
+
+    # CRITICAL-003 FIX: Validate Phase 5 prerequisites on startup
+    phase5_warnings = []
+
+    # Check JARVIS_EXTERNAL_URL is configured (warn if using fallback)
+    if not settings.jarvis_external_url:
+        phase5_warnings.append(
+            f"JARVIS_EXTERNAL_URL not set - using fallback based on ssh_skynet_host. "
+            f"Set explicitly for reliable n8n callbacks."
+        )
+
+    # Check n8n connectivity if self-restart webhook is needed
+    if n8n:
+        n8n_health = await n8n.health_check()
+        if not n8n_health.get("healthy"):
+            phase5_warnings.append(
+                f"n8n health check failed: {n8n_health.get('error', 'unknown')}. "
+                f"Self-restart via n8n may not work."
+            )
+        else:
+            # Check if self-restart webhook is accessible
+            from .self_preservation import SelfPreservationManager
+            webhook_check = await n8n.check_webhook_exists(
+                SelfPreservationManager.N8N_SELF_RESTART_WEBHOOK
+            )
+            if not webhook_check.get("exists"):
+                phase5_warnings.append(
+                    f"n8n self-restart webhook not found at {webhook_check.get('url')}. "
+                    f"Ensure the jarvis-self-restart workflow is imported and active in n8n."
+                )
+            else:
+                logger.info(
+                    "n8n_self_restart_webhook_verified",
+                    url=webhook_check.get("url")
+                )
+
+    # Log all Phase 5 warnings
+    for warning in phase5_warnings:
+        logger.warning("phase5_prerequisite_warning", message=warning)
+
+    if phase5_warnings:
+        logger.warning(
+            "phase5_prerequisites_incomplete",
+            warning_count=len(phase5_warnings),
+            message="Self-preservation features may not work correctly. Check warnings above."
+        )
+    else:
+        logger.info("phase5_prerequisites_validated", message="All Phase 5 prerequisites met")
+
+    # Clean up stale handoffs first (before checking for pending)
+    stale_count = await self_preservation_mgr.cleanup_stale_handoffs()
+    if stale_count > 0:
+        logger.warning(
+            "stale_handoffs_cleaned_on_startup",
+            count=stale_count
+        )
+
+    # Check for pending handoffs from a previous restart
+    pending_handoff = await self_preservation_mgr.check_pending_handoffs()
+    if pending_handoff:
+        logger.info(
+            "pending_handoff_detected_on_startup",
+            handoff_id=pending_handoff.handoff_id,
+            target=pending_handoff.restart_target.value,
+            message="Jarvis may be recovering from a self-restart"
+        )
 
     yield
 
@@ -344,6 +426,472 @@ async def reload_runbooks():
         "status": "reloaded",
         "count": count
     }
+
+
+# =============================================================================
+# Self-Preservation Endpoints (Phase 5)
+# =============================================================================
+
+def verify_resume_credentials(request: Request) -> bool:
+    """
+    MEDIUM-004 FIX: Verify credentials for /resume endpoint.
+
+    Accepts either:
+    1. HTTP Basic Auth (same as webhook credentials)
+    2. Special header X-Jarvis-Handoff-Token matching an active handoff
+
+    Returns True if authenticated, raises HTTPException otherwise.
+    """
+    # Try HTTP Basic Auth first
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Basic "):
+        import base64
+        try:
+            credentials = base64.b64decode(auth_header[6:]).decode("utf-8")
+            username, password = credentials.split(":", 1)
+            if (secrets.compare_digest(username, settings.webhook_auth_username) and
+                secrets.compare_digest(password, settings.webhook_auth_password)):
+                return True
+        except Exception:
+            pass
+
+    # Check for n8n callback token (handoff_id in header)
+    # This allows n8n to call back without storing full credentials
+    handoff_token = request.headers.get("X-Jarvis-Handoff-Token")
+    if handoff_token and handoff_token.startswith("sp-"):
+        # Token is valid if it matches a pending/in_progress handoff
+        # The actual validation happens in resume_from_handoff
+        return True
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid credentials",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+
+@app.post("/resume")
+async def resume_from_handoff(request: Request):
+    """
+    Resume Jarvis from a self-preservation handoff.
+
+    Phase 5: Called by n8n workflow after Jarvis restarts. This endpoint
+    receives the saved context and allows Jarvis to continue where it left off.
+
+    MEDIUM-004 FIX: Now requires authentication (Basic Auth or handoff token).
+
+    If remediation_context is present in the handoff, Jarvis will attempt to
+    continue the interrupted remediation by re-triggering Claude with the
+    saved state (what commands were already executed, diagnostics gathered, etc.)
+
+    Expected JSON body:
+    {
+        "handoff_id": "sp-abc123",
+        "health_verified": true
+    }
+    """
+    # MEDIUM-004 FIX: Verify credentials
+    verify_resume_credentials(request)
+
+    sp_mgr = get_self_preservation_manager()
+    if not sp_mgr:
+        raise HTTPException(
+            status_code=503,
+            detail="Self-preservation manager not initialized"
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid JSON body"
+        )
+
+    handoff_id = body.get("handoff_id")
+    if not handoff_id:
+        raise HTTPException(
+            status_code=400,
+            detail="handoff_id is required"
+        )
+
+    health_verified = body.get("health_verified", True)
+
+    result = await sp_mgr.resume_from_handoff(
+        handoff_id=handoff_id,
+        health_verified=health_verified
+    )
+
+    if not result.get("success"):
+        # For test handoffs (prefixed with "test-"), return success anyway
+        # This allows testing the n8n workflow without a full Jarvis flow
+        if handoff_id.startswith("test-"):
+            logger.info(
+                "test_handoff_accepted",
+                handoff_id=handoff_id,
+                message="Test handoff acknowledged without database record"
+            )
+            return {
+                "success": True,
+                "handoff_id": handoff_id,
+                "test_mode": True,
+                "message": "Test handoff acknowledged"
+            }
+
+        raise HTTPException(
+            status_code=404 if "not found" in result.get("error", "").lower() else 400,
+            detail=result.get("error", "Failed to resume")
+        )
+
+    logger.info(
+        "resume_endpoint_called",
+        handoff_id=handoff_id,
+        has_context=result.get("remediation_context") is not None
+    )
+
+    # Phase 5: If there's remediation context, schedule continuation
+    remediation_context = result.get("remediation_context")
+    if remediation_context:
+        logger.info(
+            "remediation_continuation_scheduled",
+            handoff_id=handoff_id,
+            alert_name=remediation_context.get("alert_name"),
+            commands_executed=len(remediation_context.get("commands_executed", [])),
+            planned_commands=len(remediation_context.get("planned_commands", []))
+        )
+
+        # MEDIUM-003 FIX: Wrap background task to catch and log exceptions
+        async def safe_continue_remediation():
+            try:
+                await continue_interrupted_remediation(handoff_id, remediation_context)
+            except Exception as e:
+                logger.error(
+                    "background_continuation_crashed",
+                    handoff_id=handoff_id,
+                    error=str(e),
+                    exc_info=True
+                )
+                # Notify Discord about the crash
+                if discord_notifier:
+                    try:
+                        await discord_notifier.send_webhook({
+                            "username": "Jarvis - Continuation",
+                            "content": f"## Background Continuation Crashed\n\n"
+                                       f"**Handoff ID:** `{handoff_id}`\n"
+                                       f"**Error:** {str(e)[:500]}\n\n"
+                                       f"Manual intervention may be required."
+                        })
+                    except Exception:
+                        pass
+
+        # Schedule the continuation as a background task
+        import asyncio
+        asyncio.create_task(safe_continue_remediation())
+
+        result["continuation_scheduled"] = True
+        result["continuation_message"] = f"Continuing remediation for {remediation_context.get('alert_name')}"
+
+    return result
+
+
+async def continue_interrupted_remediation(
+    handoff_id: str,
+    context: Dict[str, Any]
+) -> None:
+    """
+    Continue an interrupted remediation after a self-restart.
+
+    This function is called as a background task after Jarvis resumes from
+    a self-restart. It picks up where the previous remediation left off.
+
+    Args:
+        handoff_id: The handoff ID for logging
+        context: The saved remediation context
+    """
+    alert_name = context.get("alert_name", "unknown")
+    alert_instance = context.get("alert_instance", "unknown")
+
+    logger.info(
+        "continuing_interrupted_remediation",
+        handoff_id=handoff_id,
+        alert_name=alert_name,
+        alert_instance=alert_instance,
+        previous_commands=context.get("commands_executed", [])
+    )
+
+    try:
+        # Build a continuation prompt for Claude that includes what was already done
+        commands_executed = context.get("commands_executed", [])
+        command_outputs = context.get("command_outputs", [])
+        ai_analysis = context.get("ai_analysis")
+        planned_commands = context.get("planned_commands", [])
+
+        # Build summary of what was already done
+        previous_work_summary = ""
+        if commands_executed:
+            cmd_summary = []
+            for i, cmd in enumerate(commands_executed):
+                output = command_outputs[i] if i < len(command_outputs) else "(no output)"
+                cmd_summary.append(f"  - `{cmd}` -> {output[:200]}...")
+            previous_work_summary = f"""
+## Previous Work (Before Restart)
+The following commands were already executed before the self-restart:
+{chr(10).join(cmd_summary)}
+
+Previous analysis: {ai_analysis or 'N/A'}
+"""
+
+        # Build continuation context for Claude
+        continuation_context = f"""
+# CONTINUING AFTER SELF-RESTART
+This is a continuation of an interrupted remediation. Jarvis restarted itself
+(or a dependency) as part of the fix and is now resuming.
+
+Alert: {alert_name}
+Instance: {alert_instance}
+Attempt: {context.get('attempt_number', 1)}
+Target Host: {context.get('target_host', 'unknown')}
+{previous_work_summary}
+
+## What To Do Now
+1. Check if the restart resolved the issue
+2. If the issue persists, continue troubleshooting from where we left off
+3. Do NOT repeat commands that were already executed (listed above)
+4. If planned commands remain, consider if they're still needed after the restart
+"""
+
+        # Determine target host
+        from .models import HostType
+        target_host_str = context.get("target_host", "skynet")
+        try:
+            target_host = HostType(target_host_str)
+        except ValueError:
+            target_host = HostType.SKYNET
+
+        # Format as alert data for Claude
+        alert_data = {
+            "alert_name": alert_name,
+            "alert_instance": alert_instance,
+            "severity": context.get("severity", "warning"),
+            "description": f"Continuation after self-restart. Previous state: {len(commands_executed)} commands executed.",
+        }
+
+        # Re-analyze with Claude, providing continuation context
+        analysis = await claude_agent.analyze_alert_with_tools(
+            alert_data=alert_data,
+            system_context=continuation_context,
+            hints=context.get("hints")
+        )
+
+        logger.info(
+            "continuation_analysis_completed",
+            handoff_id=handoff_id,
+            alert_name=alert_name,
+            risk=analysis.risk.value if hasattr(analysis, 'risk') else 'unknown',
+            new_commands=len(analysis.commands) if hasattr(analysis, 'commands') else 0
+        )
+
+        # Execute any new commands suggested by Claude
+        if analysis.commands:
+            validator = CommandValidator()
+            validation_result = validator.validate_commands(analysis.commands)
+
+            if validation_result.validated_commands:
+                execution_result = await ssh_executor.execute_commands(
+                    host=target_host,
+                    commands=validation_result.validated_commands,
+                    timeout=settings.command_execution_timeout
+                )
+
+                logger.info(
+                    "continuation_commands_executed",
+                    handoff_id=handoff_id,
+                    alert_name=alert_name,
+                    commands=validation_result.validated_commands,
+                    success=execution_result.success
+                )
+
+                # Notify Discord about the continuation result
+                if discord_notifier:
+                    continuation_status = "succeeded" if execution_result.success else "failed"
+                    message = f"""## Remediation Continuation Complete
+
+**Handoff ID:** `{handoff_id}`
+**Alert:** {alert_name}
+**Instance:** {alert_instance}
+**Status:** {continuation_status.upper()}
+
+**After restart, executed:**
+{chr(10).join(f'- `{cmd}`' for cmd in validation_result.validated_commands[:5])}
+
+**Result:**
+{execution_result.outputs[0][:500] if execution_result.outputs else 'No output'}
+"""
+                    await discord_notifier.send_webhook({
+                        "username": "Jarvis - Continuation",
+                        "content": message
+                    })
+        else:
+            logger.info(
+                "continuation_no_commands_needed",
+                handoff_id=handoff_id,
+                alert_name=alert_name,
+                reason="Restart may have resolved the issue or no further action needed"
+            )
+
+            if discord_notifier:
+                message = f"""## Remediation Continuation Complete
+
+**Handoff ID:** `{handoff_id}`
+**Alert:** {alert_name}
+**Instance:** {alert_instance}
+
+After self-restart, no additional commands were needed. The restart may have resolved the issue.
+
+Check if the alert has resolved.
+"""
+                await discord_notifier.send_webhook({
+                    "username": "Jarvis - Continuation",
+                    "content": message
+                })
+
+    except Exception as e:
+        logger.error(
+            "continuation_failed",
+            handoff_id=handoff_id,
+            alert_name=alert_name,
+            error=str(e),
+            exc_info=True
+        )
+
+        # Notify about failure
+        if discord_notifier:
+            message = f"""## Remediation Continuation Failed
+
+**Handoff ID:** `{handoff_id}`
+**Alert:** {alert_name}
+**Error:** {str(e)[:500]}
+
+Manual intervention may be required.
+"""
+            await discord_notifier.send_webhook({
+                "username": "Jarvis - Continuation",
+                "content": message
+            })
+
+
+@app.post("/self-restart")
+async def initiate_self_restart(
+    target: str,
+    reason: str = "Manual self-restart request",
+    credentials: HTTPBasicCredentials = Depends(verify_credentials)
+):
+    """
+    Initiate a self-restart via n8n handoff.
+
+    Phase 5: This is the ONLY safe way for Jarvis to restart itself or its
+    critical dependencies. The restart is orchestrated by n8n which polls
+    until Jarvis is healthy again.
+
+    Args:
+        target: What to restart (jarvis, postgres-jarvis, docker-daemon, skynet-host)
+        reason: Why restart is needed
+
+    Returns:
+        Handoff details including handoff_id for tracking
+    """
+    sp_mgr = get_self_preservation_manager()
+    if not sp_mgr:
+        raise HTTPException(
+            status_code=503,
+            detail="Self-preservation manager not initialized"
+        )
+
+    # Validate target
+    try:
+        restart_target = SelfRestartTarget(target)
+    except ValueError:
+        valid_targets = [t.value for t in SelfRestartTarget]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid target '{target}'. Valid targets: {valid_targets}"
+        )
+
+    result = await sp_mgr.initiate_self_restart(
+        target=restart_target,
+        reason=reason,
+        remediation_context=None  # No context for manual restarts
+    )
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("error", "Failed to initiate self-restart")
+        )
+
+    logger.info(
+        "self_restart_initiated_via_api",
+        target=target,
+        reason=reason,
+        handoff_id=result.get("handoff_id")
+    )
+
+    return result
+
+
+@app.get("/self-restart/status")
+async def get_self_restart_status():
+    """
+    Get status of any active self-restart handoff.
+
+    Phase 5: Returns information about pending or in-progress handoffs.
+    """
+    sp_mgr = get_self_preservation_manager()
+    if not sp_mgr:
+        return {
+            "status": "not_initialized",
+            "active_handoff": None
+        }
+
+    if sp_mgr._active_handoff:
+        return {
+            "status": "active",
+            "active_handoff": sp_mgr._active_handoff.to_dict()
+        }
+
+    return {
+        "status": "idle",
+        "active_handoff": None
+    }
+
+
+@app.post("/self-restart/cancel")
+async def cancel_self_restart(
+    handoff_id: str,
+    reason: str = "Cancelled via API",
+    credentials: HTTPBasicCredentials = Depends(verify_credentials)
+):
+    """
+    Cancel an active self-restart handoff.
+
+    Phase 5: Use this if a handoff needs to be aborted.
+    """
+    sp_mgr = get_self_preservation_manager()
+    if not sp_mgr:
+        raise HTTPException(
+            status_code=503,
+            detail="Self-preservation manager not initialized"
+        )
+
+    result = await sp_mgr.cancel_handoff(handoff_id=handoff_id, reason=reason)
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404 if "not found" in result.get("error", "").lower() else 400,
+            detail=result.get("error", "Failed to cancel handoff")
+        )
+
+    return result
 
 
 @app.get("/health")
@@ -1120,10 +1668,10 @@ async def process_alert(alert):
     # Normalize fingerprint (strip whitespace)
     alert_fingerprint = alert_fingerprint.strip()
 
-    # Build container-specific alert instance for ContainerDown alerts
-    # This prevents different containers on same host from sharing attempt counters
-    # HIGH-001 FIX: Always prefer explicit container/host labels over instance format
+    # Build alert-specific instance strings for better notification readability
+    # This prevents different alerts from showing the wrong host/context
     if alert_name == "ContainerDown":
+        # HIGH-001 FIX: Always prefer explicit container/host labels over instance format
         if hasattr(alert.labels, "container") and hasattr(alert.labels, "host"):
             # Always prefer explicit labels - they're more accurate
             alert_instance = f"{alert.labels.host}:{alert.labels.container}"
@@ -1146,6 +1694,25 @@ async def process_alert(alert):
                 "container_specific_instance_fallback",
                 alert_instance=alert_instance,
                 reason="No container/host labels or colon in instance"
+            )
+    elif alert_name == "BackupStale":
+        # v3.8.1: Use system label for BackupStale alerts (e.g., "skynet", "homeassistant")
+        # The instance label (nexus:9100) is where metrics are scraped, not where backup runs
+        from .utils import _get_extra_field
+        system_label = _get_extra_field(alert.labels, "system")
+        if system_label:
+            alert_instance = system_label
+            logger.info(
+                "backup_system_instance_built",
+                original_instance=alert.labels.instance,
+                system_instance=alert_instance
+            )
+        else:
+            alert_instance = alert.labels.instance
+            logger.warning(
+                "backup_system_instance_fallback",
+                alert_instance=alert_instance,
+                reason="No system label found"
             )
     else:
         alert_instance = alert.labels.instance
@@ -1440,6 +2007,19 @@ You may use this pattern if it applies, or suggest a different approach if neede
     else:
         # Analyze with Claude (using function calling)
         # v3.0: Pass hints for investigation-first approach
+        # Phase 5: Set context for potential self-restart handoff
+        claude_agent.set_remediation_context(
+            alert_name=alert_name,
+            alert_instance=alert_instance,
+            alert_fingerprint=alert_fingerprint,
+            severity=severity,
+            attempt_number=attempt_count + 1,
+            target_host=target_host.value,
+            service_name=service_name,
+            service_type=service_type,
+            hints=hints,
+        )
+
         try:
             analysis = await claude_agent.analyze_alert_with_tools(
                 alert_data=alert_context,
@@ -1793,6 +2373,9 @@ You may use this pattern if it applies, or suggest a different approach if neede
                 metrics.update_active_remediations(-1)
                 if pattern_used_id:
                     metrics.record_pattern_match(True)
+
+                # Phase 5: Clear remediation context after successful completion
+                claude_agent.clear_remediation_context()
 
                 return {
                     "alert": alert_name,

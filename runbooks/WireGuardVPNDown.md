@@ -5,7 +5,7 @@
 
 ## Overview
 
-This alert fires when the WireGuard VPN tunnel between Nexus (192.168.0.11) and Outpost (72.60.163.242) fails.
+This alert fires when the WireGuard VPN tunnel between Nexus (<service-host-ip>) and Outpost (<vps-ip>) fails.
 This is a **cross-system issue** - you must check BOTH endpoints to determine root cause.
 
 ## Investigation Steps
@@ -66,8 +66,8 @@ wg-quick down wg0 && wg-quick up wg0
 
 | Endpoint | Host | VPN IP | Commands to Check |
 |----------|------|--------|-------------------|
-| Nexus | 192.168.0.11 | 10.99.0.1 | `ssh nexus 'wg show wg0'` |
-| Outpost | 72.60.163.242 | 10.99.0.2 | `ssh outpost 'wg show wg0'` |
+| Nexus | <service-host-ip> | 10.99.0.1 | `ssh nexus 'wg show wg0'` |
+| Outpost | <vps-ip> | 10.99.0.2 | `ssh outpost 'wg show wg0'` |
 
 If handshake is old on both sides, the tunnel is down. Restart the side that shows errors in journal first.
 

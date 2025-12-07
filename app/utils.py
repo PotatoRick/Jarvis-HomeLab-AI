@@ -309,11 +309,43 @@ def _sanitize_hint_value(value: Any) -> str:
             return ""
 
 
+def _get_extra_field(model: Any, field_name: str, default: str = "") -> str:
+    """
+    Get a field from a Pydantic model that may be in model_extra (for extra="allow" models).
+
+    Pydantic v2 stores extra fields in model_extra dict, not as direct attributes.
+    This helper handles both defined fields and extra fields consistently.
+
+    Args:
+        model: Pydantic model instance
+        field_name: Field name to retrieve
+        default: Default value if not found
+
+    Returns:
+        Field value as string
+    """
+    # First check if it's a defined field
+    if hasattr(model, field_name):
+        value = getattr(model, field_name, None)
+        if value is not None:
+            return str(value)
+
+    # Then check model_extra for dynamic fields (Pydantic v2)
+    if hasattr(model, "model_extra") and model.model_extra:
+        value = model.model_extra.get(field_name)
+        if value is not None:
+            return str(value)
+
+    return default
+
+
 def extract_hints_from_alert(alert: Alert) -> Dict[str, Any]:
     """
     Extract hints from alert labels/annotations that can help with remediation.
 
     v3.0: Enhanced hint extraction for better AI analysis.
+    v3.8.1: Added system-aware remediation for BackupStale alerts.
+    v3.8.1-fix: Fixed Pydantic v2 extra field access via model_extra.
     MEDIUM-010 FIX: Now sanitizes Unicode characters in hint values.
 
     Args:
@@ -324,25 +356,91 @@ def extract_hints_from_alert(alert: Alert) -> Dict[str, Any]:
     """
     hints = {}
 
-    # Check for remediation hints in labels
+    # Check for remediation hints in labels (using helper for extra fields)
     labels = alert.labels
-    if hasattr(labels, "remediation_hint"):
-        hints["remediation_hint"] = _sanitize_hint_value(labels.remediation_hint)
-    if hasattr(labels, "remediation_host"):
-        hints["target_host"] = _sanitize_hint_value(labels.remediation_host)
-    if hasattr(labels, "service"):
-        hints["service"] = _sanitize_hint_value(labels.service)
-    if hasattr(labels, "container"):
-        hints["container"] = _sanitize_hint_value(labels.container)
-    if hasattr(labels, "job"):
-        hints["job"] = _sanitize_hint_value(labels.job)
+
+    # Standard hint extraction using Pydantic v2-compatible helper
+    remediation_hint = _get_extra_field(labels, "remediation_hint")
+    if remediation_hint:
+        hints["remediation_hint"] = _sanitize_hint_value(remediation_hint)
+
+    remediation_host = _get_extra_field(labels, "remediation_host")
+    if remediation_host:
+        hints["target_host"] = _sanitize_hint_value(remediation_host)
+
+    service = _get_extra_field(labels, "service")
+    if service:
+        hints["service"] = _sanitize_hint_value(service)
+
+    container = _get_extra_field(labels, "container")
+    if container:
+        hints["container"] = _sanitize_hint_value(container)
+
+    job = _get_extra_field(labels, "job")
+    if job:
+        hints["job"] = _sanitize_hint_value(job)
 
     # Check for hints in annotations
     annotations = alert.annotations
-    if hasattr(annotations, "runbook_url"):
-        hints["runbook_url"] = _sanitize_hint_value(annotations.runbook_url)
-    if hasattr(annotations, "remediation"):
-        hints["suggested_remediation"] = _sanitize_hint_value(annotations.remediation)
+
+    runbook_url = _get_extra_field(annotations, "runbook_url")
+    if runbook_url:
+        hints["runbook_url"] = _sanitize_hint_value(runbook_url)
+
+    remediation = _get_extra_field(annotations, "remediation")
+    if remediation:
+        hints["suggested_remediation"] = _sanitize_hint_value(remediation)
+
+    # v3.8.1: System-aware remediation for multi-system alerts like BackupStale
+    # The 'system' label tells us which backup is stale and overrides static hints
+    alert_name = labels.alertname.lower()
+    system_label = _sanitize_hint_value(_get_extra_field(labels, "system"))
+
+    # Log at info level for visibility during debugging
+    if alert_name == "backupstale":
+        logger.info(
+            "backup_stale_label_extraction",
+            alert_name=alert_name,
+            system_label=system_label,
+            has_model_extra=bool(getattr(labels, "model_extra", None)),
+            model_extra_keys=list(getattr(labels, "model_extra", {}).keys()) if getattr(labels, "model_extra", None) else []
+        )
+
+    if alert_name == "backupstale" and system_label:
+        # Override target_host and remediation_commands based on system label
+        backup_remediation_map = {
+            "homeassistant": {
+                "target_host": "skynet",
+                "remediation_commands": "/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh"
+            },
+            "skynet": {
+                "target_host": "skynet",
+                "remediation_commands": "/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh"
+            },
+            "nexus": {
+                "target_host": "nexus",
+                "remediation_commands": "/home/<user>/docker/backups/backup_notify.sh"
+            },
+            "outpost": {
+                "target_host": "outpost",
+                "remediation_commands": "/opt/<app>/backups/backup_vps_notify.sh"
+            }
+        }
+
+        system_lower = system_label.lower()
+        if system_lower in backup_remediation_map:
+            remediation_info = backup_remediation_map[system_lower]
+            # Override the target_host from the system label (more specific than alert rule)
+            hints["target_host"] = remediation_info["target_host"]
+            hints["system_specific_command"] = remediation_info["remediation_commands"]
+            hints["system"] = system_label
+
+            logger.info(
+                "backup_stale_system_hint_applied",
+                system=system_label,
+                target_host=hints["target_host"],
+                command=hints["system_specific_command"]
+            )
 
     # MEDIUM-010 FIX: Remove empty string values
     hints = {k: v for k, v in hints.items() if v}
