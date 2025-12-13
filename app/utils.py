@@ -27,25 +27,25 @@ def determine_target_host(alert: Alert, hints: Optional[Dict[str, Any]] = None) 
     # v3.0: Check for explicit host hint first (highest priority)
     if hints and hints.get("target_host"):
         hint_host = hints["target_host"].lower()
-        if hint_host == "skynet":
+        if hint_host == "management-host":
             return HostType.SKYNET
-        elif hint_host == "nexus":
+        elif hint_host == "service-host":
             return HostType.NEXUS
-        elif hint_host in ("outpost", "vps"):
+        elif hint_host in ("vps-host", "vps"):
             return HostType.OUTPOST
-        elif hint_host in ("homeassistant", "ha"):
+        elif hint_host in ("ha-host", "ha"):
             return HostType.HOMEASSISTANT
 
     instance = alert.labels.instance.lower()
 
     # Check for explicit host indicators (hostname-based, not IP-based for portability)
-    if "outpost" in instance or "vps" in instance:
+    if "vps-host" in instance or "vps" in instance:
         return HostType.OUTPOST
-    elif "homeassistant" in instance or "ha" in instance:
+    elif "ha-host" in instance or "ha" in instance:
         return HostType.HOMEASSISTANT
-    elif "skynet" in instance:
+    elif "management-host" in instance:
         return HostType.SKYNET
-    elif "nexus" in instance:
+    elif "service-host" in instance:
         return HostType.NEXUS
 
     # Default based on common service patterns
@@ -58,12 +58,12 @@ def determine_target_host(alert: Alert, hints: Optional[Dict[str, Any]] = None) 
     elif "zigbee" in alert_name or "automation" in alert_name:
         return HostType.HOMEASSISTANT
 
-    # Default to Nexus (most services run there)
+    # Default to Service-Host (most services run there)
     logger.warning(
         "host_determination_defaulted",
         instance=instance,
         alert_name=alert.labels.alertname,
-        default="nexus"
+        default="service-host"
     )
     return HostType.NEXUS
 
@@ -409,20 +409,20 @@ def extract_hints_from_alert(alert: Alert) -> Dict[str, Any]:
     if alert_name == "backupstale" and system_label:
         # Override target_host and remediation_commands based on system label
         backup_remediation_map = {
-            "homeassistant": {
-                "target_host": "skynet",
-                "remediation_commands": "/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh"
+            "ha-host": {
+                "target_host": "management-host",
+                "remediation_commands": "/home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh"
             },
-            "skynet": {
-                "target_host": "skynet",
-                "remediation_commands": "/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh"
+            "management-host": {
+                "target_host": "management-host",
+                "remediation_commands": "/home/<user>/homelab/scripts/backup/backup_management-host_notify.sh"
             },
-            "nexus": {
-                "target_host": "nexus",
+            "service-host": {
+                "target_host": "service-host",
                 "remediation_commands": "/home/<user>/docker/backups/backup_notify.sh"
             },
-            "outpost": {
-                "target_host": "outpost",
+            "vps-host": {
+                "target_host": "vps-host",
                 "remediation_commands": "/opt/<app>/backups/backup_vps_notify.sh"
             }
         }

@@ -40,16 +40,17 @@ class CommandValidator:
 
         # Self-protection: prevent taking down Jarvis and dependencies
         # NOTE: These are tagged with _SELF_PROTECT for override capability
-        (r'docker\s+stop\s+.*jarvis', "Cannot stop Jarvis (use /self-restart API)"),
-        (r'docker\s+stop\s+.*postgres-jarvis', "Cannot stop Jarvis database (use /self-restart API)"),
-        (r'docker\s+restart\s+.*jarvis', "Cannot restart Jarvis (use /self-restart API)"),
-        (r'docker\s+restart\s+.*postgres-jarvis', "Cannot restart Jarvis database (use /self-restart API)"),
+        # Use exact matches with negative lookahead to avoid blocking other services (e.g., jarvis-discord-bot)
+        (r'docker\s+stop\s+(jarvis|ai-remediation-service-jarvis-1)(?!\S)', "Cannot stop Jarvis (use /self-restart API)"),
+        (r'docker\s+stop\s+postgres-jarvis(?!\S)', "Cannot stop Jarvis database (use /self-restart API)"),
+        (r'docker\s+restart\s+(jarvis|ai-remediation-service-jarvis-1)(?!\S)', "Cannot restart Jarvis (use /self-restart API)"),
+        (r'docker\s+restart\s+postgres-jarvis(?!\S)', "Cannot restart Jarvis database (use /self-restart API)"),
         # n8n-db is finance database, separate from Jarvis but still protected
         (r'docker\s+stop\s+.*n8n-db', "Cannot stop finance database"),
         (r'docker\s+restart\s+.*n8n-db', "Cannot restart finance database"),
-        # Note: Allow skynet-backup.service but block other skynet services
-        (r'systemctl\s+stop\s+skynet\.service', "Cannot stop Skynet main service"),
-        (r'systemctl\s+restart\s+skynet\.service', "Cannot restart Skynet main service"),
+        # Note: Allow management-host-backup.service but block other management-host services
+        (r'systemctl\s+stop\s+management-host\.service', "Cannot stop Management-Host main service"),
+        (r'systemctl\s+restart\s+management-host\.service', "Cannot restart Management-Host main service"),
 
         # File system modifications
         (r'sed\s+-i', "In-place file edit detected"),
@@ -77,9 +78,10 @@ class CommandValidator:
 
     # Self-protection patterns - these can be overridden with handoff
     # These are the only commands that the self-preservation system can execute
+    # Use exact matches with negative lookahead to avoid false positives (e.g., jarvis-discord-bot)
     SELF_PROTECTION_PATTERNS = [
-        r'docker\s+(stop|restart)\s+.*jarvis',
-        r'docker\s+(stop|restart)\s+.*postgres-jarvis',
+        r'docker\s+(stop|restart)\s+(jarvis|ai-remediation-service-jarvis-1)(?!\S)',
+        r'docker\s+(stop|restart)\s+postgres-jarvis(?!\S)',
         r'systemctl\s+restart\s+docker',
         r'\breboot\b',
     ]
@@ -270,7 +272,7 @@ To safely restart Jarvis components, use the self-preservation mechanism:
 1. Via API:
    POST /self-restart?target=jarvis&reason=Your+reason
 
-   Valid targets: jarvis, postgres-jarvis, docker-daemon, skynet-host
+   Valid targets: jarvis, postgres-jarvis, docker-daemon, management-host-host
 
 2. Via curl:
    curl -X POST "http://localhost:8000/self-restart?target=jarvis&reason=Needs+restart" \\

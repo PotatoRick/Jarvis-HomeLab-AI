@@ -1,7 +1,7 @@
 """
 Host Availability Monitoring Module
 
-Tracks the availability status of remote hosts (Nexus, HomeAssistant, Outpost)
+Tracks the availability status of remote hosts (Service-Host, HomeAssistant, VPS-Host)
 and provides intelligent routing to avoid futile connection attempts.
 """
 
@@ -57,9 +57,9 @@ class HostMonitor:
 
         # In-memory state for quick lookups
         self.hosts: Dict[str, HostState] = {
-            "nexus": HostState("nexus", HostStatus.ONLINE),
-            "homeassistant": HostState("homeassistant", HostStatus.ONLINE),
-            "outpost": HostState("outpost", HostStatus.ONLINE)
+            "service-host": HostState("service-host", HostStatus.ONLINE),
+            "ha-host": HostState("ha-host", HostStatus.ONLINE),
+            "vps-host": HostState("vps-host", HostStatus.ONLINE)
         }
 
         # Background tasks
@@ -114,7 +114,7 @@ class HostMonitor:
         Record the result of a connection attempt.
 
         Args:
-            host_name: Name of the host (nexus, homeassistant, outpost)
+            host_name: Name of the host (service-host, ha-host, vps-host)
             success: Whether the connection succeeded
             error_message: Error message if failed
         """
@@ -187,9 +187,9 @@ class HostMonitor:
 
         # Get host IP from settings
         host_map = {
-            "nexus": self.settings.ssh_nexus_host,
-            "homeassistant": self.settings.ssh_homeassistant_host,
-            "outpost": self.settings.ssh_outpost_host
+            "service-host": self.settings.ssh_service-host_host,
+            "ha-host": self.settings.ssh_ha-host_host,
+            "vps-host": self.settings.ssh_vps-host_host
         }
 
         host_ip = host_map.get(host_name)

@@ -117,10 +117,10 @@ class SSHExecutionResult(BaseModel):
 
 class HostType(str, Enum):
     """Target host types."""
-    NEXUS = "nexus"
-    HOMEASSISTANT = "homeassistant"
-    OUTPOST = "outpost"
-    SKYNET = "skynet"
+    NEXUS = "service-host"
+    HOMEASSISTANT = "ha-host"
+    OUTPOST = "vps-host"
+    SKYNET = "management-host"
 
 
 class LogGatherRequest(BaseModel):
@@ -134,7 +134,7 @@ class LogGatherRequest(BaseModel):
 class ServiceRestartRequest(BaseModel):
     """Parameters for restarting a service."""
     host: HostType
-    service_type: Literal["docker", "systemd", "homeassistant"]
+    service_type: Literal["docker", "systemd", "ha-host"]
     service_name: str
 
 

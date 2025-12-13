@@ -24,7 +24,7 @@ DATABASE_URL=postgresql://n8n:8Ws2WZpaUtiZAiWN%2Foj4gKejAE%2B4YqUj@<vps-ip>:5432
 - URL-encode special characters in password (`%2F` for `/`, `%2B` for `+`)
 - Database must exist before starting Jarvis
 - Tables are created automatically on first run
-- Use existing n8n database on Outpost
+- Use existing n8n database on VPS-Host
 
 **Connection testing:**
 ```bash
@@ -82,7 +82,7 @@ CLAUDE_MODEL=claude-3-5-haiku-20241022
 ### SSH Configuration
 
 #### `SSH_NEXUS_HOST` (required)
-IP address or hostname of Nexus server (service host).
+IP address or hostname of Service-Host server (service host).
 
 **Default:** `<service-host-ip>`
 
@@ -92,7 +92,7 @@ SSH_NEXUS_HOST=<service-host-ip>
 ```
 
 #### `SSH_NEXUS_USER` (required)
-SSH username for Nexus.
+SSH username for Service-Host.
 
 **Default:** `jordan`
 
@@ -149,7 +149,7 @@ SSH_HOMEASSISTANT_USER=jordan
 ```
 
 #### `SSH_OUTPOST_HOST` (required)
-IP address or hostname of Outpost VPS.
+IP address or hostname of VPS-Host VPS.
 
 **Default:** `<vps-ip>`
 
@@ -159,7 +159,7 @@ SSH_OUTPOST_HOST=<vps-ip>
 ```
 
 #### `SSH_OUTPOST_USER` (required)
-SSH username for Outpost.
+SSH username for VPS-Host.
 
 **Default:** `jordan`
 
@@ -476,7 +476,7 @@ curl http://localhost:8000/health
 
 ### Receiver Configuration
 
-**File:** `/home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml` (on Nexus)
+**File:** `/home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml` (on Service-Host)
 
 #### Basic Receiver
 ```yaml
@@ -588,7 +588,7 @@ Count attempts in window:
 SELECT COUNT(*)
 FROM remediation_log
 WHERE alert_name = 'ContainerDown'
-  AND alert_instance = 'nexus:omada'
+  AND alert_instance = 'service-host:omada'
   AND timestamp > NOW() - INTERVAL '2 hours';
 ```
 
@@ -757,7 +757,7 @@ asyncio.run(test())
 **Solution:**
 ```bash
 # Create database
-ssh outpost 'docker exec n8n-db createdb -U n8n finance_db'
+ssh vps-host 'docker exec n8n-db createdb -U n8n finance_db'
 ```
 
 ### SSH authentication failed
@@ -776,7 +776,7 @@ chmod 600 ./ssh_key
 ssh -i ./ssh_key jordan@<service-host-ip> 'echo test'
 
 # Verify key is authorized on host
-ssh nexus 'cat ~/.ssh/authorized_keys | grep -F "$(cat ~/.ssh/homelab_ed25519.pub)"'
+ssh service-host 'cat ~/.ssh/authorized_keys | grep -F "$(cat ~/.ssh/homelab_ed25519.pub)"'
 ```
 
 ### Claude API errors

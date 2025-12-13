@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS remediation_patterns (
     symptom_fingerprint TEXT,             -- Normalized description of the problem
     root_cause TEXT,                      -- What actually caused the issue
     solution_commands TEXT[],             -- Commands that successfully resolved it
-    target_host VARCHAR(50),              -- Override: which host to execute on (nexus, homeassistant, outpost, skynet)
+    target_host VARCHAR(50),              -- Override: which host to execute on (service-host, ha-host, vps-host, management-host)
     success_count INT DEFAULT 1,          -- How many times this pattern worked
     failure_count INT DEFAULT 0,          -- How many times it failed
     avg_resolution_time INT,              -- Average seconds to resolve
@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_feedback_outcome ON learning_feedback(outcome);
 -- Track host availability status for intelligent routing
 CREATE TABLE IF NOT EXISTS host_status_log (
     id SERIAL PRIMARY KEY,
-    host_name VARCHAR(50) NOT NULL,       -- 'nexus', 'homeassistant', 'outpost'
+    host_name VARCHAR(50) NOT NULL,       -- 'service-host', 'ha-host', 'vps-host'
     status VARCHAR(20) NOT NULL,          -- 'ONLINE', 'OFFLINE', 'CHECKING'
     failure_count INT DEFAULT 0,
     last_successful_connection TIMESTAMP,
@@ -131,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_host_status_timestamp ON host_status_log(last_che
 -- Track scheduled and active maintenance windows for alert suppression
 CREATE TABLE IF NOT EXISTS maintenance_windows (
     id SERIAL PRIMARY KEY,
-    host VARCHAR(50),                     -- 'nexus', 'outpost', 'homeassistant', 'all'
+    host VARCHAR(50),                     -- 'service-host', 'vps-host', 'ha-host', 'all'
     started_at TIMESTAMP DEFAULT NOW(),
     ended_at TIMESTAMP,
     reason TEXT,
@@ -305,49 +305,49 @@ ON CONFLICT (alert_name, symptom_fingerprint) DO NOTHING;
 -- ============================================================================
 -- BACKUP PATTERNS: Require target_host for system-specific remediation
 -- ============================================================================
--- IMPORTANT: Backup metrics are scraped from Nexus textfile collector, but scripts run on DIFFERENT hosts!
+-- IMPORTANT: Backup metrics are scraped from Service-Host textfile collector, but scripts run on DIFFERENT hosts!
 -- The 'system' label in the alert tells us WHICH backup is stale, and determines where to run the fix.
 --
 -- System        | Run Fix On | Script Path
 -- --------------|------------|-------------
--- homeassistant | skynet     | /home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh
--- skynet        | skynet     | /home/<user>/homelab/scripts/backup/backup_skynet_notify.sh
--- nexus         | nexus      | /home/<user>/docker/backups/backup_notify.sh
--- outpost       | outpost    | /opt/<app>/backups/backup_vps_notify.sh
+-- ha-host | management-host     | /home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh
+-- management-host        | management-host     | /home/<user>/homelab/scripts/backup/backup_management-host_notify.sh
+-- service-host         | service-host      | /home/<user>/docker/backups/backup_notify.sh
+-- vps-host       | vps-host    | /opt/<app>/backups/backup_vps_notify.sh
 
 INSERT INTO remediation_patterns (
     alert_name, alert_category, symptom_fingerprint, root_cause,
     solution_commands, target_host, confidence_score, created_by, metadata
 ) VALUES
-    ('BackupStale', 'backup', 'BackupStale|system:homeassistant|category:backup',
-     'Home Assistant backup script did not run or failed to upload to B2. Script runs on Skynet, not Nexus.',
-     ARRAY['/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh'],
-     'skynet', 0.90, 'seed',
-     '{"description": "Runs HA backup script on Skynet. Alert comes from Nexus metrics but fix runs on Skynet."}'::jsonb),
+    ('BackupStale', 'backup', 'BackupStale|system:ha-host|category:backup',
+     'Home Assistant backup script did not run or failed to upload to B2. Script runs on Management-Host, not Service-Host.',
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh'],
+     'management-host', 0.90, 'seed',
+     '{"description": "Runs HA backup script on Management-Host. Alert comes from Service-Host metrics but fix runs on Management-Host."}'::jsonb),
 
-    ('BackupStale', 'backup', 'BackupStale|system:nexus|category:backup',
-     'Nexus backup script did not run or failed to upload to B2.',
+    ('BackupStale', 'backup', 'BackupStale|system:service-host|category:backup',
+     'Service-Host backup script did not run or failed to upload to B2.',
      ARRAY['/home/<user>/docker/backups/backup_notify.sh'],
-     'nexus', 0.85, 'seed',
-     '{"description": "Runs Nexus backup script locally on Nexus."}'::jsonb),
+     'service-host', 0.85, 'seed',
+     '{"description": "Runs Service-Host backup script locally on Service-Host."}'::jsonb),
 
-    ('BackupStale', 'backup', 'BackupStale|system:skynet|category:backup',
-     'Skynet backup script did not run or failed to upload to B2.',
-     ARRAY['/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh'],
-     'skynet', 0.85, 'seed',
-     '{"description": "Runs Skynet backup script locally."}'::jsonb),
+    ('BackupStale', 'backup', 'BackupStale|system:management-host|category:backup',
+     'Management-Host backup script did not run or failed to upload to B2.',
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_management-host_notify.sh'],
+     'management-host', 0.85, 'seed',
+     '{"description": "Runs Management-Host backup script locally."}'::jsonb),
 
-    ('BackupStale', 'backup', 'BackupStale|system:outpost|category:backup',
-     'Outpost backup script did not run or failed to upload to B2.',
+    ('BackupStale', 'backup', 'BackupStale|system:vps-host|category:backup',
+     'VPS-Host backup script did not run or failed to upload to B2.',
      ARRAY['/opt/<app>/backups/backup_vps_notify.sh'],
-     'outpost', 0.85, 'seed',
-     '{"description": "Runs Outpost VPS backup script."}'::jsonb),
+     'vps-host', 0.85, 'seed',
+     '{"description": "Runs VPS-Host VPS backup script."}'::jsonb),
 
     ('BackupHealthCheckStale', 'monitoring', 'BackupHealthCheckStale|category:monitoring',
-     'Backup health check cron job is not running on Skynet. This script checks B2 for all backups and pushes metrics to Nexus.',
+     'Backup health check cron job is not running on Management-Host. This script checks B2 for all backups and pushes metrics to Service-Host.',
      ARRAY['/home/<user>/homelab/scripts/backup/check_b2_backups.sh'],
-     'skynet', 0.85, 'seed',
-     '{"description": "Runs backup check on Skynet and SCPs metrics to Nexus textfile collector."}'::jsonb)
+     'management-host', 0.85, 'seed',
+     '{"description": "Runs backup check on Management-Host and SCPs metrics to Service-Host textfile collector."}'::jsonb)
 
 ON CONFLICT (alert_name, symptom_fingerprint) DO NOTHING;
 
@@ -471,7 +471,7 @@ CREATE INDEX IF NOT EXISTS idx_proactive_checks_time ON proactive_checks(created
 CREATE TABLE IF NOT EXISTS state_snapshots (
     id SERIAL PRIMARY KEY,
     snapshot_id VARCHAR(64) NOT NULL UNIQUE,
-    host VARCHAR(50) NOT NULL,                -- 'nexus', 'homeassistant', 'outpost', 'skynet'
+    host VARCHAR(50) NOT NULL,                -- 'service-host', 'ha-host', 'vps-host', 'management-host'
     target_type VARCHAR(20) NOT NULL,         -- 'container', 'service', 'config', 'database'
     target_name VARCHAR(255) NOT NULL,        -- Container name, service name, etc.
     state_data TEXT,                          -- JSON blob of captured state
@@ -522,7 +522,7 @@ CREATE INDEX IF NOT EXISTS idx_n8n_time ON n8n_executions(started_at DESC);
 CREATE TABLE IF NOT EXISTS self_preservation_handoffs (
     id SERIAL PRIMARY KEY,
     handoff_id VARCHAR(64) NOT NULL UNIQUE,
-    restart_target VARCHAR(50) NOT NULL,          -- 'jarvis', 'postgres-jarvis', 'docker-daemon', 'skynet-host'
+    restart_target VARCHAR(50) NOT NULL,          -- 'jarvis', 'postgres-jarvis', 'docker-daemon', 'management-host-host'
     restart_reason TEXT NOT NULL,
     remediation_context TEXT,                     -- JSON blob of serialized RemediationContext
     status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'in_progress', 'completed', 'failed', 'timeout', 'cancelled'

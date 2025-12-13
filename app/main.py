@@ -221,7 +221,7 @@ async def lifespan(app: FastAPI):
     # Check JARVIS_EXTERNAL_URL is configured (warn if using fallback)
     if not settings.jarvis_external_url:
         phase5_warnings.append(
-            f"JARVIS_EXTERNAL_URL not set - using fallback based on ssh_skynet_host. "
+            f"JARVIS_EXTERNAL_URL not set - using fallback based on ssh_management-host_host. "
             f"Set explicitly for reliable n8n callbacks."
         )
 
@@ -662,7 +662,7 @@ Target Host: {context.get('target_host', 'unknown')}
 
         # Determine target host
         from .models import HostType
-        target_host_str = context.get("target_host", "skynet")
+        target_host_str = context.get("target_host", "management-host")
         try:
             target_host = HostType(target_host_str)
         except ValueError:
@@ -794,7 +794,7 @@ async def initiate_self_restart(
     until Jarvis is healthy again.
 
     Args:
-        target: What to restart (jarvis, postgres-jarvis, docker-daemon, skynet-host)
+        target: What to restart (jarvis, postgres-jarvis, docker-daemon, management-host-host)
         reason: Why restart is needed
 
     Returns:
@@ -1138,7 +1138,7 @@ async def start_maintenance(
     Start a maintenance window.
 
     Args:
-        host: Optional host to limit maintenance to (nexus, homeassistant, outpost)
+        host: Optional host to limit maintenance to (service-host, ha-host, vps-host)
               If not specified, applies to ALL hosts (global maintenance)
         reason: Reason for maintenance
         created_by: Who initiated the maintenance
@@ -1151,7 +1151,7 @@ async def start_maintenance(
         POST /maintenance/start?reason=System+upgrades&created_by=jordan
 
         # Host-specific maintenance
-        POST /maintenance/start?host=nexus&reason=Docker+upgrade&created_by=jordan
+        POST /maintenance/start?host=service-host&reason=Docker+upgrade&created_by=jordan
     """
     # Check if there's already an active maintenance window
     query_check = """
@@ -1250,7 +1250,7 @@ async def end_maintenance(
         POST /maintenance/end?window_id=5
 
         # End maintenance for specific host
-        POST /maintenance/end?host=nexus
+        POST /maintenance/end?host=service-host
 
         # End all active maintenance
         POST /maintenance/end
@@ -1696,8 +1696,8 @@ async def process_alert(alert):
                 reason="No container/host labels or colon in instance"
             )
     elif alert_name == "BackupStale":
-        # v3.8.1: Use system label for BackupStale alerts (e.g., "skynet", "homeassistant")
-        # The instance label (nexus:9100) is where metrics are scraped, not where backup runs
+        # v3.8.1: Use system label for BackupStale alerts (e.g., "management-host", "ha-host")
+        # The instance label (service-host:9100) is where metrics are scraped, not where backup runs
         from .utils import _get_extra_field
         system_label = _get_extra_field(alert.labels, "system")
         if system_label:
@@ -1955,14 +1955,14 @@ For VPN issues, check both endpoints - the problem might be routing, interface n
 # Instance: {alert_instance}
 {cross_system_note}
 This is a homelab infrastructure. Systems available (configure via SSH_*_HOST env vars):
-- nexus: Docker host with most services, WireGuard endpoint
-- homeassistant: Home automation hub
-- outpost: Cloud gateway with n8n, Headscale, WireGuard endpoint
+- service-host: Docker host with most services, WireGuard endpoint
+- ha-host: Home automation hub
+- vps-host: Cloud gateway with n8n, Headscale, WireGuard endpoint
 
 Common issues and fixes:
 - Container crashes: docker restart <container>
 - Systemd service down: sudo systemctl restart <service>
-- WireGuard VPN down: sudo systemctl restart wg-quick@wg0 (check BOTH nexus AND outpost)
+- WireGuard VPN down: sudo systemctl restart wg-quick@wg0 (check BOTH service-host AND vps-host)
 - Home Assistant unresponsive: ha core restart
 """
 

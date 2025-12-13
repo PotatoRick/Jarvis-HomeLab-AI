@@ -74,7 +74,7 @@ n8n_workflow_executions = Counter(
 self_restarts = Counter(
     'jarvis_self_restarts_total',
     'Self-restart operations initiated',
-    ['target', 'status']  # target: jarvis, postgres-jarvis, docker-daemon, skynet-host; status: success, failure, timeout, cancelled
+    ['target', 'status']  # target: jarvis, postgres-jarvis, docker-daemon, management-host-host; status: success, failure, timeout, cancelled
 )
 
 self_restart_failures = Counter(
@@ -275,7 +275,7 @@ def record_self_restart(target: str, status: str, duration_seconds: float = None
     Record a self-restart operation.
 
     Args:
-        target: What was restarted (jarvis, postgres-jarvis, docker-daemon, skynet-host)
+        target: What was restarted (jarvis, postgres-jarvis, docker-daemon, management-host-host)
         status: Outcome (success, failure, timeout, cancelled)
         duration_seconds: Time from initiation to completion
     """
@@ -388,7 +388,7 @@ def init_metrics(version: str):
     queue_depth.set(0)
 
     # Initialize host status gauges
-    for host in ['nexus', 'homeassistant', 'outpost', 'skynet']:
+    for host in ['service-host', 'ha-host', 'vps-host', 'management-host']:
         set_host_status(host, False)
         set_ssh_pool_connections(host, 0)
 

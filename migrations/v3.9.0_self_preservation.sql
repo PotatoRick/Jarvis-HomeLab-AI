@@ -11,7 +11,7 @@
 CREATE TABLE IF NOT EXISTS self_preservation_handoffs (
     id SERIAL PRIMARY KEY,
     handoff_id VARCHAR(64) NOT NULL UNIQUE,
-    restart_target VARCHAR(50) NOT NULL,          -- 'jarvis', 'postgres-jarvis', 'docker-daemon', 'skynet-host'
+    restart_target VARCHAR(50) NOT NULL,          -- 'jarvis', 'postgres-jarvis', 'docker-daemon', 'management-host-host'
     restart_reason TEXT NOT NULL,
     remediation_context TEXT,                     -- JSON blob of serialized RemediationContext
     status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'in_progress', 'completed', 'failed', 'timeout', 'cancelled'

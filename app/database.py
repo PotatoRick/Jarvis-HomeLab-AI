@@ -346,7 +346,7 @@ class Database:
         Get active maintenance window for a specific host or global maintenance.
 
         Args:
-            host: Host name to check (nexus, homeassistant, outpost)
+            host: Host name to check (service-host, ha-host, vps-host)
                   If None, only checks for global maintenance windows
 
         Returns:

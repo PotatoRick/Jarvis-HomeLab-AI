@@ -41,7 +41,7 @@ This document provides an in-depth look at the system design, component interact
                  │   Target Hosts (SSH)                   │
                  │                                         │
                  │  ┌────────┐  ┌────────┐  ┌────────┐   │
-                 │  │ Nexus  │  │  Home  │  │Outpost │   │
+                 │  │ Service-Host  │  │  Home  │  │VPS-Host │   │
                  │  │  Host  │  │  Asst  │  │  VPS   │   │
                  │  └────────┘  └────────┘  └────────┘   │
                  └─────────────────────────────────────────┘
@@ -148,9 +148,9 @@ count = await conn.fetchval(query, alert_name, alert_instance, window_hours)
 You are an experienced SRE managing The Burrow homelab infrastructure.
 
 # System Context
-- Nexus (<service-host-ip>): Service host (Docker containers)
+- Service-Host (<service-host-ip>): Service host (Docker containers)
 - Home Assistant (<ha-ip>): Automation hub
-- Outpost (<vps-ip>): Cloud gateway (VPS)
+- VPS-Host (<vps-ip>): Cloud gateway (VPS)
 
 # Your Task
 Analyze the alert and provide remediation commands.
@@ -194,7 +194,7 @@ DANGEROUS_PATTERNS = [
     (r'\biptables\b', "Firewall modification detected"),
     (r'docker\s+stop\s+.*jarvis', "Cannot stop Jarvis"),
     (r'docker\s+stop\s+.*n8n-db', "Cannot stop database"),
-    (r'systemctl\s+stop\s+.*skynet', "Cannot stop Skynet"),
+    (r'systemctl\s+stop\s+.*management-host', "Cannot stop Management-Host"),
     # ... 62 more patterns
 ]
 ```
@@ -202,7 +202,7 @@ DANGEROUS_PATTERNS = [
 **Self-Protection Rules:**
 - Cannot stop/restart `jarvis` container
 - Cannot stop/restart `n8n-db` (database dependency)
-- Cannot stop/restart `skynet` services (host system)
+- Cannot stop/restart `management-host` services (host system)
 
 **Risk Levels:**
 - `RiskLevel.LOW` - Safe diagnostic/restart operations
@@ -295,7 +295,7 @@ SSH_HOSTS = {
 ```python
 {
     "title": "✅ Alert Auto-Remediated",
-    "description": "**ContainerDown** on nexus:omada has been automatically fixed.",
+    "description": "**ContainerDown** on service-host:omada has been automatically fixed.",
     "color": 0x00ff00,
     "fields": [
         {"name": "Severity", "value": "CRITICAL", "inline": True},
@@ -398,7 +398,7 @@ SSH_HOSTS = {
 if ":" in alert.labels.instance and alert_name == "ContainerDown":
     alert_instance = alert.labels.instance
 elif alert_name == "ContainerDown":
-    alert_instance = f"{host}:{container}"  # e.g., "nexus:omada"
+    alert_instance = f"{host}:{container}"  # e.g., "service-host:omada"
 ```
 
 **Benefit:** Independent attempt tracking per container, compatible with Prometheus pre-formatted instances
@@ -629,7 +629,7 @@ All logs use JSON format with structured fields:
   "level": "info",
   "event": "webhook_received",
   "alert_name": "ContainerDown",
-  "alert_instance": "nexus:omada",
+  "alert_instance": "service-host:omada",
   "severity": "critical"
 }
 ```
@@ -653,7 +653,7 @@ Planned Prometheus metrics:
 ```python
 # Counters
 remediation_attempts_total{status="success|failure|escalated"}
-commands_executed_total{host="nexus|homeassistant|outpost"}
+commands_executed_total{host="service-host|ha-host|vps-host"}
 claude_api_requests_total{status="success|error"}
 
 # Histograms
@@ -752,7 +752,7 @@ database_connections_active
 
 2. **Container Stop Test**
    ```bash
-   ssh nexus 'docker stop omada'
+   ssh service-host 'docker stop omada'
    # Watch logs: docker logs -f jarvis
    ```
 
@@ -798,13 +798,13 @@ database_connections_active
 
 ## Glossary
 
-- **Alert Instance:** Unique identifier for alert occurrence (e.g., `nexus:omada`)
+- **Alert Instance:** Unique identifier for alert occurrence (e.g., `service-host:omada`)
 - **Attempt Window:** Time period for counting remediation attempts (2 hours)
 - **Actionable Command:** State-changing command that counts toward attempt limit
 - **Diagnostic Command:** Read-only command that doesn't count toward attempts
 - **Escalation:** Alert sent to Discord after max attempts reached
 - **Resolution:** Alert state change from firing → resolved
-- **SSH Host:** Target system for command execution (Nexus, HA, Outpost)
+- **SSH Host:** Target system for command execution (Service-Host, HA, VPS-Host)
 - **Risk Level:** Safety classification of command (low, medium, high)
 - **Connection Pooling:** Reusing persistent SSH connections instead of creating new ones
 
@@ -824,7 +824,7 @@ database_connections_active
 
 ### Container Instance Detection
 
-**Issue:** Container instances showing as just hostname (e.g., "nexus" instead of "nexus:container")
+**Issue:** Container instances showing as just hostname (e.g., "service-host" instead of "service-host:container")
 **Root Cause:** Prometheus alert rules already formatted instance as "host:container", but Jarvis tried to rebuild it from separate labels
 **Fix:** Check if instance contains ":" before attempting to build container-specific format
 **Impact:** Proper per-container attempt tracking, no more shared counters between different containers on same host

@@ -62,10 +62,10 @@ nano .env
 **Solution:**
 ```bash
 # Test database connection
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "SELECT 1;"'
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "SELECT 1;"'
 
 # Create database if missing
-ssh outpost 'docker exec n8n-db createdb -U n8n finance_db'
+ssh vps-host 'docker exec n8n-db createdb -U n8n finance_db'
 
 # Verify URL format
 echo $DATABASE_URL
@@ -140,7 +140,7 @@ curl -X POST http://localhost:8000/webhook \
 **Solution:**
 ```bash
 # Check Alertmanager config
-ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep jarvis'
+ssh service-host 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep jarvis'
 
 # Should see:
 # - name: 'jarvis'
@@ -148,10 +148,10 @@ ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.y
 #     - url: 'http://jarvis:8000/webhook'
 
 # If missing, add receiver
-ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh service-host 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Reload Alertmanager
-ssh nexus 'docker exec alertmanager kill -HUP 1'
+ssh service-host 'docker exec alertmanager kill -HUP 1'
 ```
 
 #### 2. Wrong Network
@@ -163,7 +163,7 @@ ssh nexus 'docker exec alertmanager kill -HUP 1'
 docker inspect jarvis --format='{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}'
 
 # Check Alertmanager network
-ssh nexus 'docker inspect alertmanager --format="{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}"'
+ssh service-host 'docker inspect alertmanager --format="{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}"'
 
 # If different, add Jarvis to alertmanager network
 docker network connect alertmanager_network jarvis
@@ -176,13 +176,13 @@ docker network connect alertmanager_network jarvis
 ```bash
 # Verify password matches
 cat .env | grep WEBHOOK_AUTH_PASSWORD
-ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep password'
+ssh service-host 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep password'
 
 # Update Alertmanager config
-ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh service-host 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Reload Alertmanager
-ssh nexus 'docker exec alertmanager kill -HUP 1'
+ssh service-host 'docker exec alertmanager kill -HUP 1'
 ```
 
 ### Alerts Received But Not Processed
@@ -198,7 +198,7 @@ ssh nexus 'docker exec alertmanager kill -HUP 1'
 docker logs jarvis | grep -E "(processing_alert|error)"
 
 # Check attempt count
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT alert_name, alert_instance, COUNT(*)
   FROM remediation_log
   WHERE timestamp > NOW() - INTERVAL '\''2 hours'\''
@@ -214,19 +214,19 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
 **Solution:**
 ```bash
 # Check attempt history
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT timestamp, success, error_message
   FROM remediation_log
   WHERE alert_name = '\''ContainerDown'\''
-    AND alert_instance = '\''nexus:omada'\''
+    AND alert_instance = '\''service-host:omada'\''
   ORDER BY timestamp DESC LIMIT 10;
 "'
 
 # If old attempts are blocking, clear them
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   DELETE FROM remediation_log
   WHERE alert_name = '\''ContainerDown'\''
-    AND alert_instance = '\''nexus:omada'\'';
+    AND alert_instance = '\''service-host:omada'\'';
 "'
 ```
 
@@ -285,13 +285,13 @@ docker compose restart jarvis
 **Solution:**
 ```bash
 # Check authorized_keys on target
-ssh nexus 'cat ~/.ssh/authorized_keys'
+ssh service-host 'cat ~/.ssh/authorized_keys'
 
 # Add public key if missing
-cat ~/.ssh/homelab_ed25519.pub | ssh nexus 'cat >> ~/.ssh/authorized_keys'
+cat ~/.ssh/homelab_ed25519.pub | ssh service-host 'cat >> ~/.ssh/authorized_keys'
 
 # Fix authorized_keys permissions
-ssh nexus 'chmod 600 ~/.ssh/authorized_keys'
+ssh service-host 'chmod 600 ~/.ssh/authorized_keys'
 ```
 
 #### 3. Host Unreachable
@@ -303,10 +303,10 @@ ssh nexus 'chmod 600 ~/.ssh/authorized_keys'
 ping -c 3 <service-host-ip>
 
 # Check SSH daemon
-ssh nexus 'systemctl status sshd'
+ssh service-host 'systemctl status sshd'
 
 # Check firewall
-ssh nexus 'sudo ufw status | grep 22'
+ssh service-host 'sudo ufw status | grep 22'
 ```
 
 ### SSH Commands Timing Out
@@ -321,7 +321,7 @@ ssh nexus 'sudo ufw status | grep 22'
 docker logs jarvis | grep -E "(command_executed|command_timeout)" | tail -20
 
 # Test command manually
-ssh nexus 'time docker restart omada'
+ssh service-host 'time docker restart omada'
 ```
 
 **Solutions:**
@@ -389,10 +389,10 @@ asyncio.run(test())
 **Solution:**
 ```bash
 # Check if n8n-db is running
-ssh outpost 'docker ps | grep n8n-db'
+ssh vps-host 'docker ps | grep n8n-db'
 
 # Start if stopped
-ssh outpost 'cd /opt/burrow && docker compose up -d n8n-db'
+ssh vps-host 'cd /opt/burrow && docker compose up -d n8n-db'
 ```
 
 #### 2. Wrong Password
@@ -402,7 +402,7 @@ ssh outpost 'cd /opt/burrow && docker compose up -d n8n-db'
 cat .env | grep DATABASE_URL
 
 # Test connection with password
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "SELECT 1;"'
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "SELECT 1;"'
 ```
 
 #### 3. Database Doesn't Exist
@@ -411,10 +411,10 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "SELECT 1;"'
 **Solution:**
 ```bash
 # Create database
-ssh outpost 'docker exec n8n-db createdb -U n8n finance_db'
+ssh vps-host 'docker exec n8n-db createdb -U n8n finance_db'
 
 # Verify
-ssh outpost 'docker exec n8n-db psql -U n8n -l | grep finance_db'
+ssh vps-host 'docker exec n8n-db psql -U n8n -l | grep finance_db'
 ```
 
 ### Table Schema Errors
@@ -426,7 +426,7 @@ ssh outpost 'docker exec n8n-db psql -U n8n -l | grep finance_db'
 # Tables should be created automatically on startup
 # If missing, create manually
 
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db' <<'SQL'
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db' <<'SQL'
 CREATE TABLE IF NOT EXISTS remediation_log (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -622,7 +622,7 @@ Discord limits webhooks to 30 requests per minute.
 ```bash
 # Reduce notification frequency
 # Increase Alertmanager repeat_interval
-ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh service-host 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Set: repeat_interval: 30m
 ```
@@ -741,7 +741,7 @@ docker compose build && docker compose up -d
 **Diagnosis:**
 ```bash
 # Check remediation duration
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT alert_name, AVG(duration_seconds) as avg_duration
   FROM remediation_log
   WHERE timestamp > NOW() - INTERVAL '\''24 hours'\''
@@ -774,7 +774,7 @@ nano app/ai_analyzer.py
 **Solution:**
 ```bash
 # Check indexes exist
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "\d remediation_log"'
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "\d remediation_log"'
 
 # Should see:
 # idx_remediation_log_alert
@@ -838,7 +838,7 @@ docker logs jarvis | grep "closing_ssh_connection"
 docker logs jarvis | grep "webhook_received" | grep "ContainerDown" | tail -20
 
 # Check Alertmanager group_interval
-ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep group_interval'
+ssh service-host 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep group_interval'
 ```
 
 **Common Causes:**
@@ -857,7 +857,7 @@ ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.y
 
 **Solution:**
 ```bash
-ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh service-host 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 
 # Change:
 # group_interval: 10s
@@ -865,7 +865,7 @@ ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.
 group_interval: 1m
 
 # Reload Alertmanager
-ssh nexus 'docker exec alertmanager kill -HUP 1'
+ssh service-host 'docker exec alertmanager kill -HUP 1'
 ```
 
 **Recommended Configuration:**
@@ -894,7 +894,7 @@ routes:
 **Diagnosis:**
 ```bash
 # Check attempt history
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT timestamp, alert_name, alert_instance, attempt_number
   FROM remediation_log
   WHERE alert_name = '\''ContainerDown'\''
@@ -908,16 +908,16 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
 **Solution:**
 ```bash
 # Clear old attempts
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   DELETE FROM remediation_log
   WHERE timestamp < NOW() - INTERVAL '\''24 hours'\'';
 "'
 
 # Or clear specific alert
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   DELETE FROM remediation_log
   WHERE alert_name = '\''ContainerDown'\''
-    AND alert_instance = '\''nexus:omada'\'';
+    AND alert_instance = '\''service-host:omada'\'';
 "'
 ```
 
@@ -927,7 +927,7 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
 
 **Symptoms:**
 - Multiple containers on same host sharing attempt counters
-- Instance showing as just hostname (e.g., "nexus" instead of "nexus:omada")
+- Instance showing as just hostname (e.g., "service-host" instead of "service-host:omada")
 
 **Root Cause:**
 Prometheus alert rules already formatted instance as "host:container", but Jarvis tried to rebuild it from separate labels, sometimes failing to detect the existing format.
@@ -943,8 +943,8 @@ docker compose build && docker compose up -d
 ```bash
 docker logs jarvis | grep "alert_instance"
 
-# Should see: alert_instance=nexus:omada
-# Not: alert_instance=nexus
+# Should see: alert_instance=service-host:omada
+# Not: alert_instance=service-host
 ```
 
 **Technical Details:**
@@ -981,7 +981,7 @@ docker logs -f jarvis
 docker logs -f jarvis | grep "alert_name=ContainerDown"
 
 # Filter for specific instance
-docker logs -f jarvis | grep "alert_instance=nexus:omada"
+docker logs -f jarvis | grep "alert_instance=service-host:omada"
 ```
 
 ### Simulate Alert Webhook
@@ -998,8 +998,8 @@ cat > test_alert.json <<'EOF'
     "status": "firing",
     "labels": {
       "alertname": "ContainerDown",
-      "instance": "nexus:9090",
-      "host": "nexus",
+      "instance": "service-host:9090",
+      "host": "service-host",
       "container": "test-container",
       "severity": "warning"
     },
@@ -1039,7 +1039,7 @@ for host, conn in ssh_executor._connections.items():
 
 ```bash
 # Last 10 remediations
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT
     timestamp,
     alert_name,
@@ -1054,7 +1054,7 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
 "'
 
 # Success rate by alert
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT
     alert_name,
     COUNT(*) as total,
@@ -1118,7 +1118,7 @@ If issues persist after trying these solutions:
    docker exec jarvis env | grep -v "PASSWORD\|KEY" > jarvis_config.txt
 
    # Database state
-   ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+   ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
      SELECT COUNT(*) FROM remediation_log;
    "' > db_state.txt
    ```

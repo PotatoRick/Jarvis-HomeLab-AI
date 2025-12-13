@@ -26,7 +26,7 @@ AND created_by = 'seed';
 DELETE FROM remediation_patterns
 WHERE alert_name = 'BackupStale'
 AND (
-    solution_commands @> ARRAY['/home/<user>/homelab/scripts/backup/backup_skynet.sh']
+    solution_commands @> ARRAY['/home/<user>/homelab/scripts/backup/backup_management-host.sh']
     OR solution_commands @> ARRAY['cd /opt/burrow && ./backup.sh']
     OR solution_commands @> ARRAY['cd /home/<user>/docker/home-stack && ./backup.sh']
 );
@@ -63,40 +63,40 @@ INSERT INTO remediation_patterns (
     created_by,
     metadata
 ) VALUES
-    -- Home Assistant backup (runs on Skynet)
-    ('BackupStale', 'backup', 'BackupStale|system:homeassistant|category:backup',
-     'Home Assistant backup script did not run or failed to upload to B2. Script runs on Skynet, not Nexus.',
-     ARRAY['/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh'],
-     'skynet', 0.90, 'low', 'seed',
-     '{"description": "Runs HA backup script on Skynet. Alert comes from Nexus metrics but fix runs on Skynet."}'::jsonb),
+    -- Home Assistant backup (runs on Management-Host)
+    ('BackupStale', 'backup', 'BackupStale|system:ha-host|category:backup',
+     'Home Assistant backup script did not run or failed to upload to B2. Script runs on Management-Host, not Service-Host.',
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh'],
+     'management-host', 0.90, 'low', 'seed',
+     '{"description": "Runs HA backup script on Management-Host. Alert comes from Service-Host metrics but fix runs on Management-Host."}'::jsonb),
 
-    -- Nexus backup (runs on Nexus)
-    ('BackupStale', 'backup', 'BackupStale|system:nexus|category:backup',
-     'Nexus backup script did not run or failed to upload to B2.',
+    -- Service-Host backup (runs on Service-Host)
+    ('BackupStale', 'backup', 'BackupStale|system:service-host|category:backup',
+     'Service-Host backup script did not run or failed to upload to B2.',
      ARRAY['/home/<user>/docker/backups/backup_notify.sh'],
-     'nexus', 0.85, 'low', 'seed',
-     '{"description": "Runs Nexus backup script locally on Nexus."}'::jsonb),
+     'service-host', 0.85, 'low', 'seed',
+     '{"description": "Runs Service-Host backup script locally on Service-Host."}'::jsonb),
 
-    -- Skynet backup (runs on Skynet)
-    ('BackupStale', 'backup', 'BackupStale|system:skynet|category:backup',
-     'Skynet backup script did not run or failed to upload to B2.',
-     ARRAY['/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh'],
-     'skynet', 0.85, 'low', 'seed',
-     '{"description": "Runs Skynet backup script locally."}'::jsonb),
+    -- Management-Host backup (runs on Management-Host)
+    ('BackupStale', 'backup', 'BackupStale|system:management-host|category:backup',
+     'Management-Host backup script did not run or failed to upload to B2.',
+     ARRAY['/home/<user>/homelab/scripts/backup/backup_management-host_notify.sh'],
+     'management-host', 0.85, 'low', 'seed',
+     '{"description": "Runs Management-Host backup script locally."}'::jsonb),
 
-    -- Outpost backup (runs on Outpost)
-    ('BackupStale', 'backup', 'BackupStale|system:outpost|category:backup',
-     'Outpost backup script did not run or failed to upload to B2.',
+    -- VPS-Host backup (runs on VPS-Host)
+    ('BackupStale', 'backup', 'BackupStale|system:vps-host|category:backup',
+     'VPS-Host backup script did not run or failed to upload to B2.',
      ARRAY['/opt/<app>/backups/backup_vps_notify.sh'],
-     'outpost', 0.85, 'low', 'seed',
-     '{"description": "Runs Outpost VPS backup script."}'::jsonb),
+     'vps-host', 0.85, 'low', 'seed',
+     '{"description": "Runs VPS-Host VPS backup script."}'::jsonb),
 
-    -- Backup health check (always runs on Skynet)
+    -- Backup health check (always runs on Management-Host)
     ('BackupHealthCheckStale', 'monitoring', 'BackupHealthCheckStale|category:monitoring',
-     'Backup health check cron job is not running on Skynet. This script checks B2 for all backups and pushes metrics to Nexus.',
+     'Backup health check cron job is not running on Management-Host. This script checks B2 for all backups and pushes metrics to Service-Host.',
      ARRAY['/home/<user>/homelab/scripts/backup/check_b2_backups.sh'],
-     'skynet', 0.85, 'low', 'seed',
-     '{"description": "Runs backup check on Skynet and SCPs metrics to Nexus textfile collector."}'::jsonb)
+     'management-host', 0.85, 'low', 'seed',
+     '{"description": "Runs backup check on Management-Host and SCPs metrics to Service-Host textfile collector."}'::jsonb)
 
 ON CONFLICT (alert_name, symptom_fingerprint) DO UPDATE SET
     root_cause = EXCLUDED.root_cause,

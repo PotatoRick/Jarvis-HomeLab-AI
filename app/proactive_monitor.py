@@ -32,17 +32,17 @@ class ProactiveMonitor:
     # Host mapping for SSH targets - configure via environment or override in subclass
     # Keys should match your Prometheus instance labels
     HOST_MAP = {
-        "nexus": "nexus",
-        "homeassistant": "homeassistant",
-        "skynet": "skynet"
+        "service-host": "service-host",
+        "ha-host": "ha-host",
+        "management-host": "management-host"
     }
 
     # Node exporter instances to monitor - configure based on your Prometheus targets
     # These should match your prometheus.yml scrape config targets
     NODE_INSTANCES = [
-        "nexus:9100",
-        "homeassistant:9100",
-        "skynet:9100",
+        "service-host:9100",
+        "ha-host:9100",
+        "management-host:9100",
     ]
 
     def __init__(

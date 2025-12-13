@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  jarvis-discord-bot:
+    build: .
+    container_name: jarvis-discord-bot
+    restart: unless-stopped
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Volume mounts
+    volumes:
+      - ./logs:/app/logs
+
+    # Health check (python -c is available in Python slim images)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default:
+    external: true
+    name: ai-remediation-service_default

@@ -37,17 +37,17 @@ class AlertSuppressor:
     # Known cascading relationships (child alerts triggered by parent)
     CASCADING_RULES = {
         "WireGuardVPNDown": [
-            "OutpostDown",
+            "VPS-HostDown",
             "PostgreSQLDown",
             "SystemDown",
             "TargetDown",
         ],
-        "OutpostDown": [
+        "VPS-HostDown": [
             "ContainerUnhealthy",
             "ContainerDown",
             "ServiceUnreachable",
         ],
-        "NexusDown": [
+        "Service-HostDown": [
             "ContainerUnhealthy",
             "ContainerDown",
             "ServiceUnreachable",

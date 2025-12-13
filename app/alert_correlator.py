@@ -57,8 +57,8 @@ class AlertCorrelator:
     # Format: (root_cause_alert, dependent_alert) -> root_cause_alert
     CASCADE_PATTERNS: Dict[tuple, str] = {
         # VPN issues cascade to remote services
-        ("WireGuardVPNDown", "OutpostDown"): "WireGuardVPNDown",
-        ("WireGuardVPNDown", "OutpostServiceDown"): "WireGuardVPNDown",
+        ("WireGuardVPNDown", "VPS-HostDown"): "WireGuardVPNDown",
+        ("WireGuardVPNDown", "VPS-HostServiceDown"): "WireGuardVPNDown",
         ("WireGuardVPNDown", "N8NDown"): "WireGuardVPNDown",
         ("WireGuardVPNDown", "ActualBudgetDown"): "WireGuardVPNDown",
 

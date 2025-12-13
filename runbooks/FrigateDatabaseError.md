@@ -2,7 +2,7 @@
 
 <!-- risk_level: medium -->
 <!-- estimated_duration: 2-5 minutes -->
-<!-- target_host: nexus -->
+<!-- target_host: service-host -->
 
 ## Overview
 

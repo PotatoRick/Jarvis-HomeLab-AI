@@ -19,9 +19,9 @@ Complete step-by-step instructions for deploying the AI remediation service to p
 
 ## Deployment Overview
 
-**Target System:** Outpost VPS (Skynet - <management-host-ip>)
+**Target System:** VPS-Host VPS (Management-Host - <management-host-ip>)
 
-**Why Outpost/Skynet:**
+**Why VPS-Host/Management-Host:**
 - Already hosts PostgreSQL database (n8n-db)
 - Has SSH access to all homelab systems
 - External IP for monitoring remote services
@@ -29,7 +29,7 @@ Complete step-by-step instructions for deploying the AI remediation service to p
 
 **Architecture:**
 ```
-Nexus (<service-host-ip>)                  Skynet/Outpost (this system)
+Service-Host (<service-host-ip>)                  Management-Host/VPS-Host (this system)
 ┌────────────────────┐                ┌──────────────────────────┐
 │  Alertmanager      │───webhook────▶ │  Jarvis                  │
 │  (Prometheus)      │                │  ├─ FastAPI webhook      │
@@ -37,9 +37,9 @@ Nexus (<service-host-ip>)                  Skynet/Outpost (this system)
                                       │  ├─ SSH executor         │
 ┌────────────────────┐                │  └─ Discord notifier     │
 │  Target Hosts      │◀──SSH─────────┤                          │
-│  ├─ Nexus          │                │  PostgreSQL (n8n-db)     │
+│  ├─ Service-Host          │                │  PostgreSQL (n8n-db)     │
 │  ├─ Home Assistant │                │  ├─ remediation_log      │
-│  └─ Outpost        │                │  └─ attempt tracking     │
+│  └─ VPS-Host        │                │  └─ attempt tracking     │
 └────────────────────┘                └──────────────────────────┘
 ```
 
@@ -50,12 +50,12 @@ Nexus (<service-host-ip>)                  Skynet/Outpost (this system)
 ### Required Services
 
 1. **PostgreSQL Database**
-   - Running on Outpost (n8n-db container)
+   - Running on VPS-Host (n8n-db container)
    - Database: `finance_db`
    - Access: `postgresql://n8n:password@host:5432/finance_db`
 
 2. **SSH Access**
-   - SSH key with access to Nexus, Home Assistant, Outpost
+   - SSH key with access to Service-Host, Home Assistant, VPS-Host
    - Key stored at: `~/.ssh/homelab_ed25519`
    - Key authorized on all target hosts
 
@@ -69,7 +69,7 @@ Nexus (<service-host-ip>)                  Skynet/Outpost (this system)
    - Webhook URL format: `https://discord.com/api/webhooks/{id}/{token}`
 
 5. **Prometheus + Alertmanager**
-   - Running on Nexus
+   - Running on Service-Host
    - Accessible at: http://<service-host-ip>:9093
 
 ### System Requirements
@@ -93,7 +93,7 @@ Nexus (<service-host-ip>)                  Skynet/Outpost (this system)
 ### Step 1: Prepare Project Directory
 
 ```bash
-# On Skynet/Outpost
+# On Management-Host/VPS-Host
 cd /home/<user>/homelab/projects/ai-remediation-service
 
 # Verify files exist
@@ -204,7 +204,7 @@ docker logs -f jarvis
 ```json
 {"timestamp":"2025-11-11T20:00:00Z","level":"info","event":"service_starting","version":"2.0.0"}
 {"timestamp":"2025-11-11T20:00:01Z","level":"info","event":"database_connected","database":"finance_db"}
-{"timestamp":"2025-11-11T20:00:02Z","level":"info","event":"ssh_keys_loaded","hosts":["nexus","homeassistant","outpost"]}
+{"timestamp":"2025-11-11T20:00:02Z","level":"info","event":"ssh_keys_loaded","hosts":["service-host","ha-host","vps-host"]}
 {"timestamp":"2025-11-11T20:00:03Z","level":"info","event":"service_ready","port":8000}
 ```
 
@@ -228,11 +228,11 @@ curl http://localhost:8000/health | jq
 
 ## Alertmanager Integration
 
-### Step 1: Configure Alertmanager on Nexus
+### Step 1: Configure Alertmanager on Service-Host
 
 ```bash
-# SSH to Nexus
-ssh nexus
+# SSH to Service-Host
+ssh service-host
 
 # Edit Alertmanager config
 nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml
@@ -293,7 +293,7 @@ route:
 ### Step 2: Reload Alertmanager
 
 ```bash
-# Still on Nexus
+# Still on Service-Host
 docker exec alertmanager kill -HUP 1
 
 # Verify reload succeeded
@@ -305,7 +305,7 @@ docker logs alertmanager --tail 20
 ### Step 3: Verify Network Connectivity
 
 ```bash
-# From Nexus, test Jarvis webhook endpoint
+# From Service-Host, test Jarvis webhook endpoint
 docker exec alertmanager wget -O- http://jarvis:8000/health
 
 # Expected: {"status":"healthy",...}
@@ -342,7 +342,7 @@ curl -X POST http://localhost:8000/webhook \
       "status": "firing",
       "labels": {
         "alertname": "TestAlert",
-        "instance": "nexus:9090",
+        "instance": "service-host:9090",
         "severity": "warning"
       },
       "annotations": {
@@ -361,7 +361,7 @@ docker logs jarvis | grep "webhook_received"
 
 ```bash
 # Stop a non-critical container to trigger alert
-ssh nexus 'docker stop omada'
+ssh service-host 'docker stop omada'
 
 # Wait 1-2 minutes for:
 # 1. Prometheus to detect container down
@@ -382,7 +382,7 @@ docker logs -f jarvis
 # 8. discord_notification_sent
 
 # Verify container restarted
-ssh nexus 'docker ps | grep omada'
+ssh service-host 'docker ps | grep omada'
 ```
 
 ### Test 3: Discord Notification
@@ -392,7 +392,7 @@ Check Discord for success notification:
 **Expected message:**
 ```
 ✅ Alert Auto-Remediated
-ContainerDown on nexus:omada has been automatically fixed.
+ContainerDown on service-host:omada has been automatically fixed.
 
 Severity: CRITICAL
 Attempt: 1/20
@@ -412,7 +412,7 @@ Container should be healthy within 30 seconds.
 
 ```bash
 # Stop another container
-ssh nexus 'docker stop scrypted'
+ssh service-host 'docker stop scrypted'
 
 # After remediation, check connection stats
 docker logs jarvis --since 3m | grep -E "(ssh_connection_established|reusing_ssh_connection)"
@@ -426,7 +426,7 @@ docker logs jarvis --since 3m | grep -E "(ssh_connection_established|reusing_ssh
 
 ```bash
 # Query remediation log
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT timestamp, alert_name, alert_instance, success, commands_executed
   FROM remediation_log
   ORDER BY timestamp DESC LIMIT 5;
@@ -442,7 +442,7 @@ ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
 ### Updating Jarvis
 
 ```bash
-# On Skynet/Outpost
+# On Management-Host/VPS-Host
 cd /home/<user>/homelab/projects/ai-remediation-service
 
 # Pull latest changes
@@ -491,18 +491,18 @@ docker compose restart jarvis
 
 ```bash
 # Check database size
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT pg_size_pretty(pg_database_size('\''finance_db'\'')) as db_size;
 "'
 
 # Archive old logs (older than 30 days)
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   DELETE FROM remediation_log
   WHERE timestamp < NOW() - INTERVAL '\''30 days'\'';
 "'
 
 # Vacuum database
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "VACUUM ANALYZE remediation_log;"'
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "VACUUM ANALYZE remediation_log;"'
 ```
 
 ---
@@ -534,7 +534,7 @@ docker logs jarvis
 docker stop jarvis
 
 # Option 2: Disable in Alertmanager
-ssh nexus 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
+ssh service-host 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
 # Comment out Jarvis route
 # Reload: docker exec alertmanager kill -HUP 1
 
@@ -621,10 +621,10 @@ docker logs jarvis | grep '"username":"Jarvis"'
 
 # 2. Verify container instance format
 docker logs jarvis | grep "alert_instance" | grep ":"
-# Should see: alert_instance=nexus:omada (not just "nexus")
+# Should see: alert_instance=service-host:omada (not just "service-host")
 
 # 3. Confirm Alertmanager timing
-ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep -A 3 "group_interval"'
+ssh service-host 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep -A 3 "group_interval"'
 # Should see: group_interval: 1m
 ```
 
@@ -632,4 +632,4 @@ ssh nexus 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.y
 
 **Last Updated:** November 11, 2025
 **Version:** 2.0.0
-**Deployment Target:** Outpost/Skynet (<management-host-ip>)
+**Deployment Target:** VPS-Host/Management-Host (<management-host-ip>)

@@ -358,7 +358,7 @@ class LearningEngine:
         different instances or minor label variations.
 
         IMPORTANT: For BackupStale alerts, the 'system' label indicates which
-        backup is stale (nexus, skynet, homeassistant, outpost) - this is
+        backup is stale (service-host, management-host, ha-host, vps-host) - this is
         critical for pattern matching.
         """
         # Priority labels for fingerprinting (checked first)
@@ -395,15 +395,15 @@ class LearningEngine:
                 value = labels[label]
                 # Normalize instance-specific values
                 if label in ['instance', 'host']:
-                    # Extract host type (nexus, homeassistant, etc) - hostname-based for portability
-                    if 'nexus' in value.lower():
-                        parts.append('host:nexus')
-                    elif 'homeassistant' in value.lower() or 'ha' in value.lower():
-                        parts.append('host:homeassistant')
-                    elif 'outpost' in value.lower() or 'vps' in value.lower():
-                        parts.append('host:outpost')
-                    elif 'skynet' in value.lower():
-                        parts.append('host:skynet')
+                    # Extract host type (service-host, ha-host, etc) - hostname-based for portability
+                    if 'service-host' in value.lower():
+                        parts.append('host:service-host')
+                    elif 'ha-host' in value.lower() or 'ha' in value.lower():
+                        parts.append('host:ha-host')
+                    elif 'vps-host' in value.lower() or 'vps' in value.lower():
+                        parts.append('host:vps-host')
+                    elif 'management-host' in value.lower():
+                        parts.append('host:management-host')
                     else:
                         parts.append(f'{label}:generic')
                 else:

@@ -12,7 +12,7 @@ from .models import ClaudeAnalysis, HostType, RiskLevel
 from .ssh_executor import ssh_executor
 from .loki_client import loki_client
 from .prometheus_client import prometheus_client
-from .homeassistant_client import ha_client, init_ha_client
+from .ha-host_client import ha_client, init_ha_client
 from .n8n_client import n8n_client, init_n8n_client
 from .runbook_manager import get_runbook_manager
 
@@ -133,7 +133,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
+                            "enum": ["service-host", "ha-host", "vps-host", "management-host"],
                             "description": "Which system to gather logs from"
                         },
                         "service_type": {
@@ -162,7 +162,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
+                            "enum": ["service-host", "ha-host", "vps-host", "management-host"],
                             "description": "Which system to check"
                         },
                         "service_name": {
@@ -187,12 +187,12 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
+                            "enum": ["service-host", "ha-host", "vps-host", "management-host"],
                             "description": "Which system the service is on"
                         },
                         "service_type": {
                             "type": "string",
-                            "enum": ["docker", "systemd", "homeassistant"],
+                            "enum": ["docker", "systemd", "ha-host"],
                             "description": "Type of service to restart"
                         },
                         "service_name": {
@@ -211,7 +211,7 @@ class ClaudeAgent:
                     "properties": {
                         "host": {
                             "type": "string",
-                            "enum": ["nexus", "homeassistant", "outpost", "skynet"],
+                            "enum": ["service-host", "ha-host", "vps-host", "management-host"],
                             "description": "Which system to execute on"
                         },
                         "command": {
@@ -345,14 +345,14 @@ class ClaudeAgent:
             },
             {
                 "name": "initiate_self_restart",
-                "description": "Initiate a safe self-restart of Jarvis or its dependencies via n8n handoff. ONLY use this when you've determined that Jarvis itself, its database (postgres-jarvis), or the Docker daemon needs to be restarted to resolve an issue. This is the ONLY safe way to restart these components - direct restart commands are blocked. The restart is orchestrated by n8n which will: 1) Save current state, 2) Execute restart, 3) Poll until healthy, 4) Resume any interrupted work. Valid targets: jarvis, postgres-jarvis, docker-daemon, skynet-host.",
+                "description": "Initiate a safe self-restart of Jarvis or its dependencies via n8n handoff. ONLY use this when you've determined that Jarvis itself, its database (postgres-jarvis), or the Docker daemon needs to be restarted to resolve an issue. This is the ONLY safe way to restart these components - direct restart commands are blocked. The restart is orchestrated by n8n which will: 1) Save current state, 2) Execute restart, 3) Poll until healthy, 4) Resume any interrupted work. Valid targets: jarvis, postgres-jarvis, docker-daemon, management-host-host.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
-                            "enum": ["jarvis", "postgres-jarvis", "docker-daemon", "skynet-host"],
-                            "description": "What to restart: jarvis (the AI remediation container), postgres-jarvis (Jarvis database), docker-daemon (Docker service on Skynet), skynet-host (full host reboot - use with extreme caution)"
+                            "enum": ["jarvis", "postgres-jarvis", "docker-daemon", "management-host-host"],
+                            "description": "What to restart: jarvis (the AI remediation container), postgres-jarvis (Jarvis database), docker-daemon (Docker service on Management-Host), management-host-host (full host reboot - use with extreme caution)"
                         },
                         "reason": {
                             "type": "string",
@@ -445,7 +445,7 @@ class ClaudeAgent:
                     command = f"docker restart {service_name}"
                 elif service_type == "systemd":
                     command = f"systemctl restart {service_name}"
-                elif service_type == "homeassistant":
+                elif service_type == "ha-host":
                     command = "ha core restart"
                 else:
                     return {

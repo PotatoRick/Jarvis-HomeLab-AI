@@ -49,7 +49,7 @@ class RollbackManager:
         Capture container state before changes.
 
         Args:
-            host: Target host (nexus, homeassistant, etc.)
+            host: Target host (service-host, ha-host, etc.)
             container: Container name
             alert_context: Optional context about why snapshot is being taken
 

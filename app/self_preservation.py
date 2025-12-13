@@ -28,8 +28,8 @@ class SelfRestartTarget(str, Enum):
     """Valid targets for self-restart operations."""
     JARVIS = "jarvis"                    # Jarvis container itself
     POSTGRES_JARVIS = "postgres-jarvis"  # Jarvis database
-    SKYNET_HOST = "skynet-host"          # Full host restart
-    DOCKER_DAEMON = "docker-daemon"      # Docker service on Skynet
+    SKYNET_HOST = "management-host-host"          # Full host restart
+    DOCKER_DAEMON = "docker-daemon"      # Docker service on Management-Host
 
 
 class HandoffStatus(str, Enum):
@@ -281,11 +281,11 @@ class SelfPreservationManager:
         self._active_handoff: Optional[SelfPreservationHandoff] = None
 
         # Jarvis API URL (for n8n to call back)
-        # Use explicit external URL if configured, otherwise fall back to ssh_skynet_host
+        # Use explicit external URL if configured, otherwise fall back to ssh_management-host_host
         if settings.jarvis_external_url:
             self._jarvis_url = settings.jarvis_external_url
         else:
-            self._jarvis_url = f"http://{settings.ssh_skynet_host}:{settings.port}"
+            self._jarvis_url = f"http://{settings.ssh_management-host_host}:{settings.port}"
             self.logger.warning(
                 "jarvis_external_url_not_configured",
                 fallback_url=self._jarvis_url,
@@ -868,8 +868,8 @@ class SelfPreservationManager:
             "callback_url": handoff.callback_url,
             "jarvis_health_url": f"{self._jarvis_url}/health",
             "timeout_minutes": timeout_minutes,
-            "ssh_host": settings.ssh_skynet_host,
-            "ssh_user": settings.ssh_skynet_user
+            "ssh_host": settings.ssh_management-host_host,
+            "ssh_user": settings.ssh_management-host_user
         }
 
         self.logger.info(

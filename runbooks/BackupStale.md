@@ -8,42 +8,42 @@
 This alert fires when a system's backup hasn't completed successfully within the expected timeframe (28 hours).
 The alert includes a `system` label indicating which backup is stale.
 
-**CRITICAL**: The `instance` label is MISLEADING for this alert! It always shows `nexus:9100` because
-the metrics are scraped from Nexus textfile collector. Use the `system` label to determine which
+**CRITICAL**: The `instance` label is MISLEADING for this alert! It always shows `service-host:9100` because
+the metrics are scraped from Service-Host textfile collector. Use the `system` label to determine which
 backup is actually stale and where to run the fix.
 
 ## System-Specific Remediation
 
 | System Label | Where to Run Fix | Script Path |
 |--------------|------------------|-------------|
-| `homeassistant` | **skynet** | `/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh` |
-| `skynet` | **skynet** | `/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh` |
-| `nexus` | **nexus** | `/home/<user>/docker/backups/backup_notify.sh` |
-| `outpost` | **outpost** | `/opt/<app>/backups/backup_vps_notify.sh` |
+| `ha-host` | **management-host** | `/home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh` |
+| `management-host` | **management-host** | `/home/<user>/homelab/scripts/backup/backup_management-host_notify.sh` |
+| `service-host` | **service-host** | `/home/<user>/docker/backups/backup_notify.sh` |
+| `vps-host` | **vps-host** | `/opt/<app>/backups/backup_vps_notify.sh` |
 
 ## Quick Remediation Commands
 
-### For `system=homeassistant` (SSH to Skynet)
+### For `system=ha-host` (SSH to Management-Host)
 ```bash
-# Run the Home Assistant backup script (runs on Skynet, backs up HA to B2)
-/home/<user>/homelab/scripts/backup/backup_homeassistant_notify.sh
+# Run the Home Assistant backup script (runs on Management-Host, backs up HA to B2)
+/home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh
 ```
 
-### For `system=skynet` (SSH to Skynet)
+### For `system=management-host` (SSH to Management-Host)
 ```bash
-# Run the Skynet backup script
-/home/<user>/homelab/scripts/backup/backup_skynet_notify.sh
+# Run the Management-Host backup script
+/home/<user>/homelab/scripts/backup/backup_management-host_notify.sh
 ```
 
-### For `system=nexus` (SSH to Nexus)
+### For `system=service-host` (SSH to Service-Host)
 ```bash
-# Run the Nexus backup script
+# Run the Service-Host backup script
 /home/<user>/docker/backups/backup_notify.sh
 ```
 
-### For `system=outpost` (SSH to Outpost)
+### For `system=vps-host` (SSH to VPS-Host)
 ```bash
-# Run the Outpost VPS backup script
+# Run the VPS-Host VPS backup script
 /opt/<app>/backups/backup_vps_notify.sh
 ```
 
@@ -64,18 +64,18 @@ backup is actually stale and where to run the fix.
 - Disk space full on source system
 - Large file causing backup timeout
 - Backup script crashed mid-execution
-- SSH key issues (for HA backup which SCPs from HA to Skynet first)
+- SSH key issues (for HA backup which SCPs from HA to Management-Host first)
 
 ## Diagnostic Commands
 
 ### Check backup timer status (systemd systems)
 ```bash
-# On Skynet
-systemctl status skynet-backup.timer
+# On Management-Host
+systemctl status management-host-backup.timer
 systemctl list-timers --all | grep backup
 
 # Check last run
-journalctl -u skynet-backup.service --since "1 hour ago"
+journalctl -u management-host-backup.service --since "1 hour ago"
 ```
 
 ### Check rclone config
@@ -84,18 +84,18 @@ journalctl -u skynet-backup.service --since "1 hour ago"
 rclone listremotes
 
 # Test B2 connectivity
-rclone lsd b2:theburrow-backups --max-depth 1
+rclone lsd b2:<your-b2-bucket> --max-depth 1
 
 # Check recent backups for specific system
-rclone ls b2:theburrow-backups/Skynet/ | tail -10
-rclone ls b2:theburrow-backups/HomeAssistant/Daily/ | tail -10
-rclone ls b2:theburrow-backups/Nexus/ | tail -10
-rclone ls b2:theburrow-backups/Outpost/ | tail -10
+rclone ls b2:<your-b2-bucket>/Management-Host/ | tail -10
+rclone ls b2:<your-b2-bucket>/HomeAssistant/Daily/ | tail -10
+rclone ls b2:<your-b2-bucket>/Service-Host/ | tail -10
+rclone ls b2:<your-b2-bucket>/VPS-Host/ | tail -10
 ```
 
-### Manually update backup metrics (on Skynet)
+### Manually update backup metrics (on Management-Host)
 ```bash
-# Re-run the backup health check and push metrics to Nexus
+# Re-run the backup health check and push metrics to Service-Host
 /home/<user>/homelab/scripts/backup/check_b2_backups.sh
 ```
 
@@ -103,25 +103,25 @@ rclone ls b2:theburrow-backups/Outpost/ | tail -10
 
 ```
 Backup Scripts          B2 Cloud Storage        Health Check         Prometheus
-(Run on each host)  --> (theburrow-backups) <-- (check_b2_backups.sh) --> (Scrapes Nexus)
+(Run on each host)  --> (<your-b2-bucket>) <-- (check_b2_backups.sh) --> (Scrapes Service-Host)
                                                       |
                                                       | SCP metrics file
                                                       v
-                                            Nexus textfile_collector
+                                            Service-Host textfile_collector
                                                       |
                                                       v
-                                            Prometheus scrapes nexus:9100
+                                            Prometheus scrapes service-host:9100
                                                       |
                                                       v
-                                            Alert fires with instance=nexus:9100
+                                            Alert fires with instance=service-host:9100
                                             BUT system label tells the truth!
 ```
 
 ## Notes
 
 - **ALWAYS check the `system` label**, NOT the `instance` label
-- Instance always shows `nexus:9100` because that's where metrics are scraped
-- The `check_b2_backups.sh` script runs on Skynet and SCPs metrics to Nexus
+- Instance always shows `service-host:9100` because that's where metrics are scraped
+- The `check_b2_backups.sh` script runs on Management-Host and SCPs metrics to Service-Host
 - If backup consistently fails, check logs and B2 API errors
 - Rate limiting from B2 can cause intermittent failures
 - Large database dumps may cause timeouts - check for growing data
@@ -130,12 +130,12 @@ Backup Scripts          B2 Cloud Storage        Health Check         Prometheus
 
 After running the backup script, wait 5-10 minutes for:
 1. Backup to complete and upload to B2
-2. Next run of `check_b2_backups.sh` (runs hourly via cron on Skynet)
+2. Next run of `check_b2_backups.sh` (runs hourly via cron on Management-Host)
 3. Prometheus to scrape updated metrics
 
 Or force a verification:
 ```bash
-# On Skynet - re-check B2 and update metrics immediately
+# On Management-Host - re-check B2 and update metrics immediately
 /home/<user>/homelab/scripts/backup/check_b2_backups.sh
 
 # Then check the metric value

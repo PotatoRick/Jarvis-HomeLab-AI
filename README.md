@@ -71,7 +71,7 @@ route:
 
 ### Core Capabilities
 - **Autonomous Remediation**: Analyzes alerts and executes corrective commands automatically
-- **Multi-Host Support**: SSH into Nexus, Home Assistant, Outpost, or Skynet to fix issues
+- **Multi-Host Support**: SSH into Service-Host, Home Assistant, VPS-Host, or Management-Host to fix issues
 - **Smart Command Validation**: Blacklist-only safety checks prevent destructive actions
 - **Attempt Tracking**: 2-hour rolling window with configurable max attempts
 - **Container-Specific Tracking**: Separate attempt counters for each container
@@ -154,7 +154,7 @@ Jarvis uses a **permissive validation approach**: all commands are allowed unles
 - Reboots/shutdowns (`reboot`, `poweroff`, `halt`)
 - Firewall changes (`iptables`, `ufw`, `nft`)
 - Package management (`apt`, `yum`, `dnf`)
-- Self-sabotage (stopping jarvis, n8n-db, or Skynet services)
+- Self-sabotage (stopping jarvis, n8n-db, or Management-Host services)
 
 **Allowed (Examples):**
 - Service restarts (`docker restart`, `systemctl restart`)
@@ -168,7 +168,7 @@ Jarvis uses a **permissive validation approach**: all commands are allowed unles
 - Restarting the `jarvis` container
 - Restarting `postgres-jarvis` (its database)
 - Restarting Docker daemon
-- Rebooting Skynet host
+- Rebooting Management-Host host
 
 **Self-Preservation Mechanism (v3.9.0):**
 When Jarvis needs to restart itself or dependencies, it safely hands off to n8n:
@@ -183,7 +183,7 @@ When Jarvis needs to restart itself or dependencies, it safely hands off to n8n:
 - `jarvis` - Restart Jarvis container
 - `postgres-jarvis` - Restart database + Jarvis
 - `docker-daemon` - Restart Docker service
-- `skynet-host` - Reboot Skynet host
+- `management-host-host` - Reboot Management-Host host
 
 **API:**
 ```bash
@@ -222,14 +222,14 @@ docker logs jarvis | grep -E "(ssh_connection_established|reusing_ssh_connection
 ### Database Queries
 ```bash
 # View recent attempts
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT timestamp, alert_name, alert_instance, success, commands_executed
   FROM remediation_log
   ORDER BY timestamp DESC LIMIT 10;
 "'
 
 # Check attempt counts by alert
-ssh outpost 'docker exec n8n-db psql -U n8n -d finance_db -c "
+ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
   SELECT alert_name, alert_instance, COUNT(*) as attempts
   FROM remediation_log
   WHERE timestamp > NOW() - INTERVAL '\''2 hours'\''
@@ -358,7 +358,7 @@ ai-remediation-service/
 ### Running Tests
 ```bash
 # Manual alert simulation
-ssh nexus 'docker stop omada'  # Trigger ContainerDown alert
+ssh service-host 'docker stop omada'  # Trigger ContainerDown alert
 # Watch logs: docker logs -f jarvis
 # Container should restart automatically
 
@@ -372,7 +372,7 @@ docker logs jarvis | grep -E "(ssh_connection_established|reusing_ssh_connection
 
 For production deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md)
 
-**Quick deployment on Outpost (Skynet):**
+**Quick deployment on VPS-Host (Management-Host):**
 ```bash
 cd /home/<user>/homelab/projects/ai-remediation-service
 git pull origin main
@@ -392,7 +392,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for complete version history.
 - **Self-Restart Capability**: Jarvis can safely restart itself or dependencies via n8n orchestration
 - **Context Preservation**: Saves remediation state before restart and continues afterward
 - **n8n Handoff Workflow**: External orchestration handles restart polling and callback
-- **Protected Targets**: jarvis, postgres-jarvis, docker-daemon, skynet-host
+- **Protected Targets**: jarvis, postgres-jarvis, docker-daemon, management-host-host
 - **Stale Handoff Cleanup**: Automatic cleanup of abandoned handoffs on startup
 - **New Endpoints**: `/self-restart`, `/resume`, `/self-restart/status`, `/self-restart/cancel`
 

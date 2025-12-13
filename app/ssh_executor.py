@@ -141,24 +141,24 @@ class SSHExecutor:
         # Host configuration mapping
         self.host_config = {
             HostType.NEXUS: {
-                "host": settings.ssh_nexus_host,
-                "username": settings.ssh_nexus_user,
-                "client_keys": [settings.ssh_nexus_key_path],
+                "host": settings.ssh_service-host_host,
+                "username": settings.ssh_service-host_user,
+                "client_keys": [settings.ssh_service-host_key_path],
             },
             HostType.HOMEASSISTANT: {
-                "host": settings.ssh_homeassistant_host,
-                "username": settings.ssh_homeassistant_user,
-                "client_keys": [settings.ssh_homeassistant_key_path],
+                "host": settings.ssh_ha-host_host,
+                "username": settings.ssh_ha-host_user,
+                "client_keys": [settings.ssh_ha-host_key_path],
             },
             HostType.OUTPOST: {
-                "host": settings.ssh_outpost_host,
-                "username": settings.ssh_outpost_user,
-                "client_keys": [settings.ssh_outpost_key_path],
+                "host": settings.ssh_vps-host_host,
+                "username": settings.ssh_vps-host_user,
+                "client_keys": [settings.ssh_vps-host_key_path],
             },
             HostType.SKYNET: {
-                "host": settings.ssh_skynet_host,
-                "username": settings.ssh_skynet_user,
-                "client_keys": [settings.ssh_skynet_key_path],
+                "host": settings.ssh_management-host_host,
+                "username": settings.ssh_management-host_user,
+                "client_keys": [settings.ssh_management-host_key_path],
             },
         }
 
@@ -277,12 +277,12 @@ class SSHExecutor:
         Returns:
             SSH connection object
         """
-        # For localhost (Outpost or Skynet when running locally), use subprocess instead
-        if host == HostType.OUTPOST and settings.ssh_outpost_host == "localhost":
+        # For localhost (VPS-Host or Management-Host when running locally), use subprocess instead
+        if host == HostType.OUTPOST and settings.ssh_vps-host_host == "localhost":
             # Return None to signal we should use subprocess instead
             return None
-        if host == HostType.SKYNET and settings.ssh_skynet_host == "localhost":
-            # Skynet is where Jarvis runs - execute locally
+        if host == HostType.SKYNET and settings.ssh_management-host_host == "localhost":
+            # Management-Host is where Jarvis runs - execute locally
             return None
 
         # Check if we have an existing connection that's still alive
@@ -405,10 +405,10 @@ class SSHExecutor:
                     attempt=attempt + 1 if attempt > 0 else None
                 )
 
-                # Handle local execution (Outpost or Skynet)
-                if host == HostType.OUTPOST and settings.ssh_outpost_host == "localhost":
+                # Handle local execution (VPS-Host or Management-Host)
+                if host == HostType.OUTPOST and settings.ssh_vps-host_host == "localhost":
                     return await self._execute_local(command, timeout)
-                if host == HostType.SKYNET and settings.ssh_skynet_host == "localhost":
+                if host == HostType.SKYNET and settings.ssh_management-host_host == "localhost":
                     return await self._execute_local(command, timeout)
 
                 # Remote execution via SSH

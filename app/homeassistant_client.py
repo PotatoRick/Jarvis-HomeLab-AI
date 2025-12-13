@@ -59,7 +59,7 @@ class HomeAssistantClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        self.logger = logger.bind(component="homeassistant_client")
+        self.logger = logger.bind(component="ha-host_client")
 
     def _resolve_addon_slug(self, addon: str) -> str:
         """

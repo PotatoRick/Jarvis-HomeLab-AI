@@ -35,22 +35,22 @@ class Settings(BaseSettings):
     # SSH Configuration
     # All hosts use consistent key path /app/ssh_key (mounted in docker-compose.yml)
     # Override these via environment variables for your infrastructure
-    ssh_nexus_host: str = "localhost"
-    ssh_nexus_user: str = "root"
-    ssh_nexus_key_path: str = "/app/ssh_key"
+    ssh_service-host_host: str = "localhost"
+    ssh_service-host_user: str = "root"
+    ssh_service-host_key_path: str = "/app/ssh_key"
 
-    ssh_homeassistant_host: str = "localhost"
-    ssh_homeassistant_user: str = "root"
-    ssh_homeassistant_key_path: str = "/app/ssh_key"
+    ssh_ha-host_host: str = "localhost"
+    ssh_ha-host_user: str = "root"
+    ssh_ha-host_key_path: str = "/app/ssh_key"
 
-    ssh_outpost_host: str = "localhost"
-    ssh_outpost_user: str = "root"
-    ssh_outpost_key_path: str = "/app/ssh_key"
+    ssh_vps-host_host: str = "localhost"
+    ssh_vps-host_user: str = "root"
+    ssh_vps-host_key_path: str = "/app/ssh_key"
 
-    # Skynet - where Jarvis runs, but SSH to access host filesystem
-    ssh_skynet_host: str = "localhost"
-    ssh_skynet_user: str = "root"
-    ssh_skynet_key_path: str = "/app/ssh_key"
+    # Management-Host - where Jarvis runs, but SSH to access host filesystem
+    ssh_management-host_host: str = "localhost"
+    ssh_management-host_user: str = "root"
+    ssh_management-host_key_path: str = "/app/ssh_key"
 
     ssh_timeout: int = 60
     ssh_connection_timeout: int = 10
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
 
     # Phase 5: Self-preservation settings
     # External URL for n8n to callback to Jarvis (must be reachable from n8n host)
-    # Defaults to ssh_skynet_host:port but should be set explicitly in production
+    # Defaults to ssh_management-host_host:port but should be set explicitly in production
     jarvis_external_url: Optional[str] = None  # e.g., "http://<management-host-ip>:8000"
     self_restart_timeout_minutes: int = 10  # Max time for n8n to poll before timeout
     stale_handoff_cleanup_minutes: int = 30  # Auto-cleanup handoffs older than this
@@ -130,7 +130,7 @@ class Settings(BaseSettings):
         HIGH-001 FIX: Validate JARVIS_EXTERNAL_URL format.
 
         Must be a valid HTTP(S) URL and cannot contain 'localhost' since
-        n8n runs on Outpost and needs to reach Jarvis on Skynet.
+        n8n runs on VPS-Host and needs to reach Jarvis on Management-Host.
         """
         if v is None:
             return v
@@ -150,7 +150,7 @@ class Settings(BaseSettings):
                 f"JARVIS_EXTERNAL_URL must be a valid HTTP(S) URL, got: {v}"
             )
 
-        # Warn about localhost (n8n on Outpost can't reach localhost)
+        # Warn about localhost (n8n on VPS-Host can't reach localhost)
         # Don't error - might be valid in development
         if 'localhost' in v.lower() or '127.0.0.1' in v:
             import warnings

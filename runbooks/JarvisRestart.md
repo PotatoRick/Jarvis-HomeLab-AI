@@ -55,15 +55,15 @@ Jarvis API                n8n Workflow               Docker/Host
 
 4. **Health endpoint unreachable from n8n**
    ```bash
-   # Test from Outpost (where n8n runs)
-   ssh outpost 'curl -s http://<management-host-ip>:8000/health'
+   # Test from VPS-Host (where n8n runs)
+   ssh vps-host 'curl -s http://<management-host-ip>:8000/health'
    ```
 
 **Remediation:**
 1. Check Docker logs for specific errors
 2. Manually restart if needed: `docker restart jarvis`
 3. Verify health: `curl http://<management-host-ip>:8000/health`
-4. Check network connectivity between Outpost and Skynet
+4. Check network connectivity between VPS-Host and Management-Host
 
 ### 2. Handoff Not Triggering n8n
 
@@ -90,7 +90,7 @@ docker exec jarvis env | grep N8N_URL
 
 3. **Network connectivity**
    ```bash
-   # Test from Skynet
+   # Test from Management-Host
    curl -s https://n8n.yourdomain.com/webhook/jarvis-self-restart
    ```
 
@@ -130,21 +130,21 @@ curl -X POST "http://<management-host-ip>:8000/self-restart/cancel?handoff_id=<h
 **Common SSH Errors:**
 
 1. **Authentication failed**
-   - Check SSH key in n8n credentials matches Skynet's authorized_keys
+   - Check SSH key in n8n credentials matches Management-Host's authorized_keys
    - Verify username is correct (should be `t1`)
 
 2. **Host key verification failed**
-   - SSH to Skynet once from Outpost to accept host key
+   - SSH to Management-Host once from VPS-Host to accept host key
    - Or add StrictHostKeyChecking=no to SSH config
 
 3. **Connection refused**
-   - Verify SSH service running on Skynet: `systemctl status sshd`
-   - Check firewall allows SSH from Outpost
+   - Verify SSH service running on Management-Host: `systemctl status sshd`
+   - Check firewall allows SSH from VPS-Host
 
 **Remediation:**
 ```bash
-# Test SSH from Outpost manually
-ssh outpost 'ssh -i /path/to/key t1@<management-host-ip> "echo test"'
+# Test SSH from VPS-Host manually
+ssh vps-host 'ssh -i /path/to/key t1@<management-host-ip> "echo test"'
 ```
 
 ### 5. Resume Endpoint Fails
@@ -198,7 +198,7 @@ docker exec postgres-jarvis psql -U jarvis -d jarvis -c \
    - Include in regular backup rotation
 
 3. **Network redundancy**
-   - Ensure VPN tunnel stable between Outpost and Skynet
+   - Ensure VPN tunnel stable between VPS-Host and Management-Host
    - Consider fallback paths
 
 ## Manual Recovery
@@ -206,8 +206,8 @@ docker exec postgres-jarvis psql -U jarvis -d jarvis -c \
 If the self-preservation system completely fails, manually restart:
 
 ```bash
-# SSH to Skynet
-ssh skynet
+# SSH to Management-Host
+ssh management-host
 
 # Restart Jarvis manually
 docker restart jarvis
