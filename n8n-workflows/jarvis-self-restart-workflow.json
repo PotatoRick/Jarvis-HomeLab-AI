@@ -1,0 +1,481 @@
+{
+  "name": "Jarvis Self-Restart Orchestrator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "jarvis-self-restart",
+        "options": {
+          "responseData": "allEntries"
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "jarvis-self-restart"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "validate-payload",
+              "leftValue": "={{ $json.body.handoff_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validate-input",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeCommand",
+        "command": "={{ $json.body.restart_command }}"
+      },
+      "id": "execute-restart",
+      "name": "Execute Restart Command",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [900, 200],
+      "credentials": {
+        "sshPassword": {
+          "id": "skynet-ssh",
+          "name": "Skynet SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      },
+      "id": "wait-initial",
+      "name": "Wait 15 seconds",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Webhook Trigger').item.json.body.jarvis_health_url }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "poll-health",
+      "name": "Poll Jarvis Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "check-healthy",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "healthy",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-health",
+      "name": "Is Jarvis Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook Trigger').item.json.body.callback_url }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "handoff_id",
+              "value": "={{ $('Webhook Trigger').item.json.body.handoff_id }}"
+            },
+            {
+              "name": "health_verified",
+              "value": "={{ true }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "callback-resume",
+      "name": "Callback to Jarvis /resume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 100]
+    },
+    {
+      "parameters": {
+        "values": {
+          "number": [
+            {
+              "name": "retry_count",
+              "value": "={{ ($('Set Retry Counter').item.json.retry_count || 0) + 1 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "increment-retry",
+      "name": "Increment Retry Counter",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "check-max-retries",
+              "leftValue": "={{ $json.retry_count }}",
+              "rightValue": "={{ $('Webhook Trigger').item.json.body.timeout_minutes * 6 }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-max-retries",
+      "name": "Max Retries Reached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "amount": 10,
+        "unit": "seconds"
+      },
+      "id": "wait-retry",
+      "name": "Wait Before Retry",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "## :warning: Self-Restart Timeout\n\n**Handoff ID:** `{{ $('Webhook Trigger').item.json.body.handoff_id }}`\n**Target:** {{ $('Webhook Trigger').item.json.body.restart_target }}\n**Reason:** {{ $('Webhook Trigger').item.json.body.restart_reason }}\n\nJarvis did not come back online within the timeout period.\n\n**Manual intervention required.**",
+        "options": {
+          "username": "Jarvis Self-Restart"
+        }
+      },
+      "id": "discord-timeout",
+      "name": "Discord Timeout Alert",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2.1,
+      "position": [2220, 400],
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "discord-webhook",
+          "name": "Discord Webhook"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "## :arrows_counterclockwise: Self-Restart Initiated\n\n**Handoff ID:** `{{ $json.body.handoff_id }}`\n**Target:** {{ $json.body.restart_target }}\n**Command:** `{{ $json.body.restart_command }}`\n**Reason:** {{ $json.body.restart_reason }}\n\nn8n is executing the restart and will poll until Jarvis is healthy.",
+        "options": {
+          "username": "Jarvis Self-Restart"
+        }
+      },
+      "id": "discord-start",
+      "name": "Discord Start Notification",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2.1,
+      "position": [680, 100],
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "discord-webhook",
+          "name": "Discord Webhook"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "values": {
+          "number": [
+            {
+              "name": "retry_count",
+              "value": 0
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-retry-counter",
+      "name": "Set Retry Counter",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'Invalid payload - missing handoff_id' }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "respond-error",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, handoff_id: $('Webhook Trigger').item.json.body.handoff_id, status: 'initiated' }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "## :white_check_mark: Self-Restart Complete\n\n**Handoff ID:** `{{ $('Webhook Trigger').item.json.body.handoff_id }}`\n**Target:** {{ $('Webhook Trigger').item.json.body.restart_target }}\n\nJarvis is back online and resuming operations.",
+        "options": {
+          "username": "Jarvis Self-Restart"
+        }
+      },
+      "id": "discord-success",
+      "name": "Discord Success Notification",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2.1,
+      "position": [2000, 100],
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "discord-webhook",
+          "name": "Discord Webhook"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "Set Retry Counter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Discord Start Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Retry Counter": {
+      "main": [
+        [
+          {
+            "node": "Execute Restart Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Restart Command": {
+      "main": [
+        [
+          {
+            "node": "Wait 15 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 15 seconds": {
+      "main": [
+        [
+          {
+            "node": "Poll Jarvis Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Jarvis Health": {
+      "main": [
+        [
+          {
+            "node": "Is Jarvis Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Jarvis Healthy?": {
+      "main": [
+        [
+          {
+            "node": "Callback to Jarvis /resume",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Increment Retry Counter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Callback to Jarvis /resume": {
+      "main": [
+        [
+          {
+            "node": "Discord Success Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Retry Counter": {
+      "main": [
+        [
+          {
+            "node": "Max Retries Reached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Max Retries Reached?": {
+      "main": [
+        [
+          {
+            "node": "Wait Before Retry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord Timeout Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Before Retry": {
+      "main": [
+        [
+          {
+            "node": "Poll Jarvis Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 600,
+    "errorWorkflow": "",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "jarvis"
+    }
+  ]
+}
