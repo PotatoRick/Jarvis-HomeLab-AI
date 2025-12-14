@@ -1,4 +1,23 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jarvis AI Remediation Service - Docker Compose
+# ═══════════════════════════════════════════════════════════════════════════════
+# Quick Start:
+#   1. Run ./setup.sh to create .env and configure SSH key
+#   2. docker compose up -d
+#   3. curl http://localhost:8000/health
+#
+# Or manually:
+#   1. cp .env.example .env && nano .env
+#   2. cp ~/.ssh/your_key ./ssh_key && chmod 600 ./ssh_key
+#   3. docker compose up -d
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL Database
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Stores remediation logs, learned patterns, and attempt tracking.
+  # Data persists in the postgres-data volume.
   postgres-jarvis:
     image: postgres:16-alpine
     container_name: postgres-jarvis
@@ -22,11 +41,16 @@ services:
       resources:
         limits:
           memory: 256M
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Jarvis AI Remediation Service
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Receives alerts from Alertmanager and automatically remediates issues
+  # using Claude AI to analyze problems and execute safe fixes via SSH.
   jarvis:
     build: .
+    # Alternative: Pull pre-built image from registry
+    # image: registry.theburrow.casa/jarvis:latest
     container_name: jarvis
     restart: unless-stopped
     depends_on:
@@ -35,81 +59,119 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Database
+      # ─────────────────────────────────────────────────────────────────────────
+      # Core Configuration (Required)
+      # ─────────────────────────────────────────────────────────────────────────
       - DATABASE_URL=${DATABASE_URL}
-
-      # Claude API
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-haiku-20241022}
 
-      # SSH Configuration - configure these for your infrastructure
+      # ─────────────────────────────────────────────────────────────────────────
+      # SSH Configuration
+      # ─────────────────────────────────────────────────────────────────────────
+      # Primary host (required)
       - SSH_NEXUS_HOST=${SSH_NEXUS_HOST:-localhost}
       - SSH_NEXUS_USER=${SSH_NEXUS_USER:-root}
       - SSH_NEXUS_KEY_PATH=/app/ssh_key
 
+      # Home Assistant (optional)
       - SSH_HOMEASSISTANT_HOST=${SSH_HOMEASSISTANT_HOST:-localhost}
       - SSH_HOMEASSISTANT_USER=${SSH_HOMEASSISTANT_USER:-root}
       - SSH_HOMEASSISTANT_KEY_PATH=/app/ssh_key
 
+      # Cloud/VPS (optional)
       - SSH_OUTPOST_HOST=${SSH_OUTPOST_HOST:-localhost}
       - SSH_OUTPOST_USER=${SSH_OUTPOST_USER:-root}
       - SSH_OUTPOST_KEY_PATH=/app/ssh_key
 
-      # Management-Host (must NOT be localhost - Jarvis runs in Docker, not on Management-Host directly)
-      - SSH_SKYNET_HOST=${SSH_SKYNET_HOST:-<management-host-ip>}
-      - SSH_SKYNET_USER=${SSH_SKYNET_USER:-t1}
+      # Management host (optional - for self-preservation)
+      - SSH_SKYNET_HOST=${SSH_SKYNET_HOST:-localhost}
+      - SSH_SKYNET_USER=${SSH_SKYNET_USER:-root}
       - SSH_SKYNET_KEY_PATH=/app/ssh_key
 
-      # Discord
-      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      # ─────────────────────────────────────────────────────────────────────────
+      # Discord Notifications
+      # ─────────────────────────────────────────────────────────────────────────
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - DISCORD_ENABLED=${DISCORD_ENABLED:-true}
 
-      # Security
+      # ─────────────────────────────────────────────────────────────────────────
+      # Webhook Security
+      # ─────────────────────────────────────────────────────────────────────────
       - WEBHOOK_AUTH_USERNAME=${WEBHOOK_AUTH_USERNAME:-alertmanager}
       - WEBHOOK_AUTH_PASSWORD=${WEBHOOK_AUTH_PASSWORD}
 
+      # ─────────────────────────────────────────────────────────────────────────
+      # Remediation Settings
+      # ─────────────────────────────────────────────────────────────────────────
+      - MAX_ATTEMPTS_PER_ALERT=${MAX_ATTEMPTS_PER_ALERT:-3}
+      - ATTEMPT_WINDOW_HOURS=${ATTEMPT_WINDOW_HOURS:-2}
+      - COMMAND_EXECUTION_TIMEOUT=${COMMAND_EXECUTION_TIMEOUT:-60}
+      - FINGERPRINT_COOLDOWN_SECONDS=${FINGERPRINT_COOLDOWN_SECONDS:-300}
+      - ESCALATION_COOLDOWN_HOURS=${ESCALATION_COOLDOWN_HOURS:-4}
+
+      # ─────────────────────────────────────────────────────────────────────────
       # Logging
+      # ─────────────────────────────────────────────────────────────────────────
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
 
-      # Remediation Settings
-      - MAX_ATTEMPTS_PER_ALERT=${MAX_ATTEMPTS_PER_ALERT:-3}
-      - ATTEMPT_WINDOW_HOURS=${ATTEMPT_WINDOW_HOURS:-24}
-      - COMMAND_EXECUTION_TIMEOUT=${COMMAND_EXECUTION_TIMEOUT:-60}
-
-      # Prometheus & Loki
+      # ─────────────────────────────────────────────────────────────────────────
+      # Prometheus & Loki (Advanced)
+      # ─────────────────────────────────────────────────────────────────────────
       - PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
       - LOKI_URL=${LOKI_URL:-http://localhost:3100}
-
-      # Verification Settings
-      - VERIFICATION_ENABLED=${VERIFICATION_ENABLED:-true}
+      - VERIFICATION_ENABLED=${VERIFICATION_ENABLED:-false}
       - VERIFICATION_MAX_WAIT_SECONDS=${VERIFICATION_MAX_WAIT_SECONDS:-120}
       - VERIFICATION_POLL_INTERVAL=${VERIFICATION_POLL_INTERVAL:-10}
 
-      # n8n Integration (for self-preservation workflows)
+      # ─────────────────────────────────────────────────────────────────────────
+      # Home Assistant Integration (Advanced)
+      # ─────────────────────────────────────────────────────────────────────────
+      - HA_URL=${HA_URL:-http://localhost:8123}
+      - HA_TOKEN=${HA_TOKEN:-}
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # n8n Integration (Advanced)
+      # ─────────────────────────────────────────────────────────────────────────
       - N8N_URL=${N8N_URL:-http://localhost:5678}
+      - N8N_API_KEY=${N8N_API_KEY:-}
       - N8N_SELF_RESTART_WEBHOOK=${N8N_SELF_RESTART_WEBHOOK:-}
 
+      # ─────────────────────────────────────────────────────────────────────────
+      # Self-Preservation (Advanced)
+      # ─────────────────────────────────────────────────────────────────────────
+      - JARVIS_EXTERNAL_URL=${JARVIS_EXTERNAL_URL:-}
+      - SELF_RESTART_TIMEOUT_MINUTES=${SELF_RESTART_TIMEOUT_MINUTES:-10}
+      - STALE_HANDOFF_CLEANUP_MINUTES=${STALE_HANDOFF_CLEANUP_MINUTES:-30}
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Proactive Monitoring (Advanced)
+      # ─────────────────────────────────────────────────────────────────────────
+      - PROACTIVE_MONITORING_ENABLED=${PROACTIVE_MONITORING_ENABLED:-false}
+      - PROACTIVE_CHECK_INTERVAL=${PROACTIVE_CHECK_INTERVAL:-300}
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Anomaly Detection (Advanced)
+      # ─────────────────────────────────────────────────────────────────────────
+      - ANOMALY_DETECTION_ENABLED=${ANOMALY_DETECTION_ENABLED:-false}
+      - ANOMALY_CHECK_INTERVAL=${ANOMALY_CHECK_INTERVAL:-300}
+      - ANOMALY_Z_SCORE_WARNING=${ANOMALY_Z_SCORE_WARNING:-3.0}
+      - ANOMALY_Z_SCORE_CRITICAL=${ANOMALY_Z_SCORE_CRITICAL:-4.0}
+
     volumes:
-      # SSH key
+      # SSH key (required)
       - ./ssh_key:/app/ssh_key:ro
 
-      # Optional: Mount config for runtime updates
-      - ./app:/app/app:ro
-
-      # Runbooks for hot-reload
+      # Runbooks for hot-reload (optional but recommended)
       - ./runbooks:/app/runbooks:ro
 
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-      - "traefik.enable=false"
+      start_period: 15s
 
 volumes:
   postgres-data:
