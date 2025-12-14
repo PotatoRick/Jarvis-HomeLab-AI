@@ -2,6 +2,9 @@
 
 Complete step-by-step instructions for deploying the AI remediation service to production.
 
+> **Note:** Most users should use the interactive setup wizard (`./setup.sh`) instead of this guide.
+> This document is for advanced deployments, custom configurations, or troubleshooting.
+
 ---
 
 ## Table of Contents
@@ -19,17 +22,14 @@ Complete step-by-step instructions for deploying the AI remediation service to p
 
 ## Deployment Overview
 
-**Target System:** VPS-Host VPS (Management-Host - <management-host-ip>)
-
-**Why VPS-Host/Management-Host:**
-- Already hosts PostgreSQL database (n8n-db)
-- Has SSH access to all homelab systems
-- External IP for monitoring remote services
-- Not a critical service host (safe to restart)
+**Recommended Deployment Location:**
+- A management server or VPS with SSH access to all monitored hosts
+- Not a critical service host (safe to restart without affecting production)
+- Has network connectivity to Prometheus/Alertmanager
 
 **Architecture:**
 ```
-Service-Host (<service-host-ip>)                  Management-Host/VPS-Host (this system)
+Service Host (your-server-ip)            Management Host (jarvis-host-ip)
 ┌────────────────────┐                ┌──────────────────────────┐
 │  Alertmanager      │───webhook────▶ │  Jarvis                  │
 │  (Prometheus)      │                │  ├─ FastAPI webhook      │
@@ -37,9 +37,9 @@ Service-Host (<service-host-ip>)                  Management-Host/VPS-Host (this
                                       │  ├─ SSH executor         │
 ┌────────────────────┐                │  └─ Discord notifier     │
 │  Target Hosts      │◀──SSH─────────┤                          │
-│  ├─ Service-Host          │                │  PostgreSQL (n8n-db)     │
+│  ├─ Primary Host   │                │  PostgreSQL              │
 │  ├─ Home Assistant │                │  ├─ remediation_log      │
-│  └─ VPS-Host        │                │  └─ attempt tracking     │
+│  └─ Other servers  │                │  └─ attempt tracking     │
 └────────────────────┘                └──────────────────────────┘
 ```
 
@@ -50,14 +50,14 @@ Service-Host (<service-host-ip>)                  Management-Host/VPS-Host (this
 ### Required Services
 
 1. **PostgreSQL Database**
-   - Running on VPS-Host (n8n-db container)
-   - Database: `finance_db`
-   - Access: `postgresql://n8n:password@host:5432/finance_db`
+   - Included in docker-compose.yml (postgres-jarvis container)
+   - Or use an existing PostgreSQL instance
+   - Database: `jarvis`
+   - Access: `postgresql://jarvis:password@postgres-jarvis:5432/jarvis`
 
 2. **SSH Access**
-   - SSH key with access to Service-Host, Home Assistant, VPS-Host
-   - Key stored at: `~/.ssh/homelab_ed25519`
-   - Key authorized on all target hosts
+   - SSH key with access to your target hosts
+   - Key authorized on all servers you want Jarvis to manage
 
 3. **Claude API Key**
    - Account at https://console.anthropic.com/
@@ -69,14 +69,14 @@ Service-Host (<service-host-ip>)                  Management-Host/VPS-Host (this
    - Webhook URL format: `https://discord.com/api/webhooks/{id}/{token}`
 
 5. **Prometheus + Alertmanager**
-   - Running on Service-Host
-   - Accessible at: http://<service-host-ip>:9093
+   - Running somewhere in your infrastructure
+   - Can send webhooks to Jarvis
 
 ### System Requirements
 
 **Minimum:**
 - CPU: 1 core
-- RAM: 256 MB
+- RAM: 256 MB (512 MB with included PostgreSQL)
 - Disk: 100 MB
 - Network: Internet access (Claude API)
 
@@ -90,11 +90,25 @@ Service-Host (<service-host-ip>)                  Management-Host/VPS-Host (this
 
 ## Initial Deployment
 
-### Step 1: Prepare Project Directory
+### Option 1: Interactive Setup (Recommended)
 
 ```bash
-# On Management-Host/VPS-Host
-cd /home/<user>/homelab/projects/ai-remediation-service
+# Clone repository
+git clone https://github.com/PotatoRick/Jarvis-HomeLab-AI.git
+cd Jarvis-HomeLab-AI
+
+# Run setup wizard
+./setup.sh
+
+# Follow prompts for Quick Start or Full Setup
+```
+
+### Option 2: Manual Deployment
+
+#### Step 1: Prepare Project Directory
+
+```bash
+cd /path/to/Jarvis-HomeLab-AI
 
 # Verify files exist
 ls -la
@@ -103,10 +117,11 @@ ls -la
 # - docker-compose.yml
 # - Dockerfile
 # - .env.example
+# - setup.sh
 # - README.md
 ```
 
-### Step 2: Configure Environment
+#### Step 2: Configure Environment
 
 ```bash
 # Copy environment template
@@ -118,22 +133,25 @@ nano .env
 
 **Required settings:**
 ```bash
-# Database
-DATABASE_URL=postgresql://n8n:YOUR_PASSWORD@<vps-ip>:5432/finance_db
+# Database (use included postgres-jarvis container)
+DATABASE_URL=postgresql://jarvis:YOUR_PASSWORD@postgres-jarvis:5432/jarvis
+POSTGRES_PASSWORD=YOUR_PASSWORD
 
 # Claude API
 ANTHROPIC_API_KEY=sk-ant-api03-YOUR_KEY_HERE
 CLAUDE_MODEL=claude-3-5-haiku-20241022
 
-# SSH Configuration (use defaults)
-SSH_NEXUS_HOST=<service-host-ip>
-SSH_NEXUS_USER=jordan
-SSH_HOMEASSISTANT_HOST=<ha-ip>
-SSH_HOMEASSISTANT_USER=jordan
-SSH_OUTPOST_HOST=<vps-ip>
-SSH_OUTPOST_USER=jordan
+# SSH Configuration
+SSH_NEXUS_HOST=192.168.1.100        # Your primary service host
+SSH_NEXUS_USER=your_username
 
-# Discord
+# Optional additional hosts
+SSH_HOMEASSISTANT_HOST=192.168.1.101
+SSH_HOMEASSISTANT_USER=root
+SSH_OUTPOST_HOST=your.vps.hostname
+SSH_OUTPOST_USER=your_username
+
+# Discord (optional but recommended)
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE
 DISCORD_ENABLED=true
 
@@ -146,18 +164,18 @@ LOG_LEVEL=INFO
 LOG_FORMAT=json
 
 # Remediation Settings
-MAX_ATTEMPTS_PER_ALERT=20
+MAX_ATTEMPTS_PER_ALERT=3
 ATTEMPT_WINDOW_HOURS=2
 COMMAND_EXECUTION_TIMEOUT=60
 ```
 
 **Save the `WEBHOOK_AUTH_PASSWORD`** - you'll need it for Alertmanager configuration.
 
-### Step 3: Set Up SSH Key
+#### Step 3: Set Up SSH Key
 
 ```bash
 # Copy SSH key to project directory
-cp ~/.ssh/homelab_ed25519 ./ssh_key
+cp ~/.ssh/your_key ./ssh_key
 
 # CRITICAL: Set correct permissions
 chmod 600 ./ssh_key
@@ -167,34 +185,20 @@ ls -la ./ssh_key
 # Should show: -rw------- (600)
 
 # Test SSH key works
-ssh -i ./ssh_key jordan@<service-host-ip> 'echo "SSH test successful"'
-ssh -i ./ssh_key jordan@<ha-ip> 'echo "SSH test successful"'
+ssh -i ./ssh_key your_user@your-host 'echo "SSH test successful"'
 ```
 
-### Step 4: Verify Database
-
-```bash
-# Test database connection
-docker exec n8n-db psql -U n8n -d finance_db -c "SELECT 1;"
-
-# If database doesn't exist, create it
-docker exec n8n-db createdb -U n8n finance_db
-
-# Verify
-docker exec n8n-db psql -U n8n -l | grep finance_db
-```
-
-### Step 5: Build and Deploy
+#### Step 4: Build and Deploy
 
 ```bash
 # Build Docker image
 docker compose build
 
-# Start service
+# Start service (includes postgres-jarvis database)
 docker compose up -d
 
-# Verify container is running
-docker ps | grep jarvis
+# Verify containers are running
+docker ps | grep -E "(jarvis|postgres-jarvis)"
 
 # Check logs for startup
 docker logs -f jarvis
@@ -202,13 +206,13 @@ docker logs -f jarvis
 
 **Expected startup output:**
 ```json
-{"timestamp":"2025-11-11T20:00:00Z","level":"info","event":"service_starting","version":"2.0.0"}
-{"timestamp":"2025-11-11T20:00:01Z","level":"info","event":"database_connected","database":"finance_db"}
-{"timestamp":"2025-11-11T20:00:02Z","level":"info","event":"ssh_keys_loaded","hosts":["service-host","ha-host","vps-host"]}
-{"timestamp":"2025-11-11T20:00:03Z","level":"info","event":"service_ready","port":8000}
+{"timestamp":"...","level":"info","event":"service_starting","version":"3.12.0"}
+{"timestamp":"...","level":"info","event":"database_connected","database":"jarvis"}
+{"timestamp":"...","level":"info","event":"ssh_keys_loaded","hosts":["nexus"]}
+{"timestamp":"...","level":"info","event":"service_ready","port":8000}
 ```
 
-### Step 6: Health Check
+#### Step 5: Health Check
 
 ```bash
 # Test health endpoint
@@ -218,8 +222,8 @@ curl http://localhost:8000/health | jq
 {
   "status": "healthy",
   "database": "connected",
-  "timestamp": "2025-11-11T20:00:00Z",
-  "version": "2.0.0",
+  "timestamp": "...",
+  "version": "3.12.0",
   "model": "claude-3-5-haiku-20241022"
 }
 ```
@@ -228,28 +232,21 @@ curl http://localhost:8000/health | jq
 
 ## Alertmanager Integration
 
-### Step 1: Configure Alertmanager on Service-Host
+### Step 1: Configure Alertmanager
 
-```bash
-# SSH to Service-Host
-ssh service-host
+Edit your Alertmanager configuration:
 
-# Edit Alertmanager config
-nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml
-```
-
-**Add Jarvis receiver:**
 ```yaml
 receivers:
-  # Existing Discord receiver
-  - name: 'discord-homelab'
+  # Your existing receiver (optional)
+  - name: 'discord'
     webhook_configs:
       - url: 'YOUR_DISCORD_WEBHOOK'
 
-  # NEW: Add Jarvis receiver
+  # Add Jarvis receiver
   - name: 'jarvis'
     webhook_configs:
-      - url: 'http://jarvis:8000/webhook'
+      - url: 'http://jarvis-host:8000/webhook'
         send_resolved: true
         http_config:
           basic_auth:
@@ -260,7 +257,7 @@ receivers:
 **Update routing:**
 ```yaml
 route:
-  receiver: 'discord-homelab'  # Default receiver
+  receiver: 'discord'  # Default receiver
   group_by: ['alertname', 'instance']
   group_wait: 5s
   group_interval: 1m
@@ -271,7 +268,7 @@ route:
     # Route 1: Send to Discord (existing)
     - matchers:
         - alertname =~ ".+"
-      receiver: 'discord-homelab'
+      receiver: 'discord'
       continue: true  # IMPORTANT: Continue to next route
 
     # Route 2: Send to Jarvis for auto-remediation
@@ -284,42 +281,38 @@ route:
 - `send_resolved: true` - Enables attempt cleanup when alerts resolve
 - `continue: true` - Ensures alerts go to BOTH Discord and Jarvis
 - `group_wait: 5s` - Send first webhook 5 seconds after alert fires
-- `group_interval: 1m` - Retry every 1 minute if alert persists (prevents webhook spam)
+- `group_interval: 1m` - Retry every 1 minute if alert persists
 - `repeat_interval: 30m` - Resend after 30 minutes if still unresolved
-- `resolve_timeout: 5m` - Wait 5 min before confirming alert is resolved
-
-**Important:** The `group_interval: 1m` setting was optimized on November 11, 2025. Previously `10s`, which caused excessive duplicate webhooks. The 1-minute interval provides ~120 retry opportunities in the 2-hour attempt window while preventing spam.
 
 ### Step 2: Reload Alertmanager
 
 ```bash
-# Still on Service-Host
+# Reload configuration
 docker exec alertmanager kill -HUP 1
 
 # Verify reload succeeded
 docker logs alertmanager --tail 20
-
 # Should see: "Loading configuration file"
 ```
 
 ### Step 3: Verify Network Connectivity
 
 ```bash
-# From Service-Host, test Jarvis webhook endpoint
-docker exec alertmanager wget -O- http://jarvis:8000/health
+# From Alertmanager host, test Jarvis webhook endpoint
+curl http://jarvis-host:8000/health
 
-# Expected: {"status":"healthy",...}
+# If on same Docker network
+docker exec alertmanager wget -O- http://jarvis:8000/health
 ```
 
-If this fails:
+If connectivity fails, ensure Jarvis is on the same Docker network:
 
 ```bash
 # Check Docker networks
 docker network ls
 
-# Jarvis must be on same network as Alertmanager
-# If not, add to network:
-docker network connect home-stack_default jarvis
+# Connect Jarvis to Alertmanager's network if needed
+docker network connect your-network jarvis
 ```
 
 ---
@@ -342,13 +335,13 @@ curl -X POST http://localhost:8000/webhook \
       "status": "firing",
       "labels": {
         "alertname": "TestAlert",
-        "instance": "service-host:9090",
+        "instance": "test-host:9090",
         "severity": "warning"
       },
       "annotations": {
         "description": "Manual test alert"
       },
-      "startsAt": "2025-11-11T20:00:00Z",
+      "startsAt": "2025-01-01T00:00:00Z",
       "fingerprint": "test123"
     }]
   }'
@@ -361,7 +354,7 @@ docker logs jarvis | grep "webhook_received"
 
 ```bash
 # Stop a non-critical container to trigger alert
-ssh service-host 'docker stop omada'
+ssh your-host 'docker stop some-test-container'
 
 # Wait 1-2 minutes for:
 # 1. Prometheus to detect container down
@@ -376,13 +369,13 @@ docker logs -f jarvis
 # 2. processing_alert
 # 3. claude_api_call
 # 4. command_validated
-# 5. ssh_connection_established (or reusing_ssh_connection)
+# 5. ssh_connection_established
 # 6. command_executed
 # 7. remediation_success
 # 8. discord_notification_sent
 
 # Verify container restarted
-ssh service-host 'docker ps | grep omada'
+ssh your-host 'docker ps | grep some-test-container'
 ```
 
 ### Test 3: Discord Notification
@@ -392,47 +385,31 @@ Check Discord for success notification:
 **Expected message:**
 ```
 ✅ Alert Auto-Remediated
-ContainerDown on service-host:omada has been automatically fixed.
+ContainerDown on your-host:container has been automatically fixed.
 
 Severity: CRITICAL
-Attempt: 1/20
+Attempt: 1/3
 Duration: 5 seconds
 
 AI Analysis:
-Container 'omada' stopped unexpectedly. Restarting service.
+Container 'container' stopped unexpectedly. Restarting service.
 
 Commands Executed:
-docker restart omada
+docker restart container
 
 Expected Outcome:
 Container should be healthy within 30 seconds.
 ```
 
-### Test 4: SSH Connection Pooling
-
-```bash
-# Stop another container
-ssh service-host 'docker stop scrypted'
-
-# After remediation, check connection stats
-docker logs jarvis --since 3m | grep -E "(ssh_connection_established|reusing_ssh_connection)"
-
-# Expected:
-# ssh_connection_established (count: 1)
-# reusing_ssh_connection (count: many)
-```
-
-### Test 5: Database Logging
+### Test 4: Database Logging
 
 ```bash
 # Query remediation log
-ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
+docker exec -it postgres-jarvis psql -U jarvis -d jarvis -c "
   SELECT timestamp, alert_name, alert_instance, success, commands_executed
   FROM remediation_log
   ORDER BY timestamp DESC LIMIT 5;
-"'
-
-# Verify entries exist for test alerts
+"
 ```
 
 ---
@@ -442,8 +419,7 @@ ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
 ### Updating Jarvis
 
 ```bash
-# On Management-Host/VPS-Host
-cd /home/<user>/homelab/projects/ai-remediation-service
+cd /path/to/Jarvis-HomeLab-AI
 
 # Pull latest changes
 git pull origin main
@@ -469,40 +445,35 @@ nano .env
 docker compose restart jarvis
 
 # Verify new configuration
-docker exec jarvis python -c "
-from app.config import settings
-print(f'Max attempts: {settings.max_attempts_per_alert}')
-print(f'Model: {settings.claude_model}')
-"
+curl http://localhost:8000/health
 ```
 
-### Log Rotation
+### Log Management
 
 ```bash
-# Logs stored in Docker
+# Export logs to file
 docker logs jarvis --since 24h > jarvis_logs_$(date +%Y%m%d).log
 
-# Trim old logs
-docker logs jarvis --tail 10000 > /tmp/jarvis_trimmed.log
-docker compose restart jarvis
+# View recent logs
+docker logs jarvis --tail 100
 ```
 
 ### Database Maintenance
 
 ```bash
 # Check database size
-ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
-  SELECT pg_size_pretty(pg_database_size('\''finance_db'\'')) as db_size;
-"'
+docker exec postgres-jarvis psql -U jarvis -d jarvis -c "
+  SELECT pg_size_pretty(pg_database_size('jarvis')) as db_size;
+"
 
 # Archive old logs (older than 30 days)
-ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "
+docker exec postgres-jarvis psql -U jarvis -d jarvis -c "
   DELETE FROM remediation_log
-  WHERE timestamp < NOW() - INTERVAL '\''30 days'\'';
-"'
+  WHERE timestamp < NOW() - INTERVAL '30 days';
+"
 
 # Vacuum database
-ssh vps-host 'docker exec n8n-db psql -U n8n -d finance_db -c "VACUUM ANALYZE remediation_log;"'
+docker exec postgres-jarvis psql -U jarvis -d jarvis -c "VACUUM ANALYZE remediation_log;"
 ```
 
 ---
@@ -534,11 +505,11 @@ docker logs jarvis
 docker stop jarvis
 
 # Option 2: Disable in Alertmanager
-ssh service-host 'nano /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml'
-# Comment out Jarvis route
+# Comment out Jarvis route in alertmanager.yml
 # Reload: docker exec alertmanager kill -HUP 1
 
-# Option 3: Enable maintenance mode (not yet implemented)
+# Option 3: Enable maintenance mode
+curl -X POST "http://localhost:8000/maintenance/start?reason=planned+upgrade"
 ```
 
 ### Emergency Shutdown
@@ -560,14 +531,14 @@ docker rm jarvis
 
 ### Pre-Deployment
 
-- [ ] PostgreSQL database exists and accessible
+- [ ] PostgreSQL database accessible (included or external)
 - [ ] SSH key authorized on all target hosts
 - [ ] SSH key has 600 permissions
 - [ ] Claude API key is valid and has credit
-- [ ] Discord webhook URL is correct
+- [ ] Discord webhook URL is correct (if using)
 - [ ] `.env` file configured with all required variables
 - [ ] `WEBHOOK_AUTH_PASSWORD` generated and saved
-- [ ] Network connectivity verified (Docker network)
+- [ ] Network connectivity verified to all hosts
 - [ ] Alertmanager configuration backed up
 
 ### Post-Deployment
@@ -578,10 +549,9 @@ docker rm jarvis
 - [ ] SSH connections tested to all hosts
 - [ ] Manual webhook test passed
 - [ ] Real alert test passed (container stop/restart)
-- [ ] Discord notification received
+- [ ] Discord notification received (if enabled)
 - [ ] Database logging verified (remediation_log table)
 - [ ] Alertmanager receiving webhooks (check logs)
-- [ ] SSH connection pooling working (check logs)
 
 ### Monitoring
 
@@ -594,42 +564,57 @@ docker rm jarvis
 
 ---
 
-## Post-Deployment Notes (November 11, 2025)
+## Troubleshooting
 
-### Recent Bug Fixes Applied
+### Setup Validation
 
-If deploying after November 11, 2025, these fixes are already included:
-
-1. **Discord Notifications**
-   - Username corrected to "Jarvis" (was "Homelab SRE")
-   - Fixed `NameError` in success notifications (missing `max_attempts` parameter)
-
-2. **Container Instance Detection**
-   - Improved logic to handle Prometheus pre-formatted instances
-   - Prevents multiple containers on same host from sharing attempt counters
-
-3. **Alertmanager Configuration**
-   - `group_interval` optimized to `1m` (was `10s`)
-   - Prevents duplicate webhook spam
-   - Maintains retry capability (~120 attempts in 2-hour window)
-
-### Verify Fixes After Deployment
+Run the setup wizard in validate mode:
 
 ```bash
-# 1. Check Discord username
-docker logs jarvis | grep '"username":"Jarvis"'
+./setup.sh --validate
+```
 
-# 2. Verify container instance format
-docker logs jarvis | grep "alert_instance" | grep ":"
-# Should see: alert_instance=service-host:omada (not just "service-host")
+This will check:
+- All required environment variables
+- SSH connectivity to configured hosts
+- Database connection
+- Claude API key validity
 
-# 3. Confirm Alertmanager timing
-ssh service-host 'cat /home/<user>/docker/home-stack/alertmanager/config/alertmanager.yml | grep -A 3 "group_interval"'
-# Should see: group_interval: 1m
+### Common Issues
+
+**Container won't start:**
+```bash
+docker logs jarvis
+# Look for configuration or dependency errors
+```
+
+**SSH connection failures:**
+```bash
+# Test manually
+ssh -i ./ssh_key -o StrictHostKeyChecking=no user@host 'echo test'
+
+# Check key permissions
+ls -la ./ssh_key  # Must be 600
+```
+
+**Database connection errors:**
+```bash
+# Check postgres-jarvis is running
+docker ps | grep postgres-jarvis
+
+# Test connection
+docker exec postgres-jarvis psql -U jarvis -d jarvis -c "SELECT 1;"
+```
+
+**Alertmanager not sending webhooks:**
+```bash
+# Check Alertmanager logs
+docker logs alertmanager | grep jarvis
+
+# Verify webhook URL is reachable from Alertmanager
 ```
 
 ---
 
-**Last Updated:** November 11, 2025
-**Version:** 2.0.0
-**Deployment Target:** VPS-Host/Management-Host (<management-host-ip>)
+**Last Updated:** December 2025
+**Version:** 3.12.0
