@@ -7,6 +7,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.0] - 2025-12-14
+
+### Added: Proactive Anomaly Remediation (Phase 6 Enhancement)
+
+**"Jarvis now silently fixes sustained anomalies before they become critical alerts"**
+
+This release enhances Phase 6 anomaly detection to trigger autonomous remediation when anomalies persist, rather than just sending notifications. Temporary spikes (like Docker builds) are filtered out, and daily reports summarize what was proactively fixed.
+
+---
+
+### Added
+
+#### Sustained Anomaly Tracking
+- **Consecutive detection counting**: Anomalies must persist for 3+ consecutive checks (~15 minutes) before triggering remediation
+- **Automatic clearing**: When anomaly resolves, the sustained count resets
+- **Spike filtering**: Temporary CPU/memory spikes from builds, backups, etc. are ignored
+
+#### Proactive Remediation Pipeline
+- **Synthetic alert generation**: Sustained anomalies create alerts that flow through the standard remediation pipeline
+- **Remediation callback**: `_anomaly_remediation_callback()` converts anomaly data to Alert objects
+- **Silent resolution**: Issues are fixed without notification unless escalation is needed
+- **Full audit trail**: All synthetic alerts logged for daily reporting
+
+#### Daily Anomaly Reports
+- **Scheduled at 8 AM local time**: Summary sent to Discord (only if there were synthetic alerts)
+- **No spam**: Report is skipped if no anomalies were remediated
+- **Severity breakdown**: Shows count of critical/warning/info anomalies handled
+- **Alert list**: Top 10 alerts with details, indicates if more were truncated
+
+#### New API Endpoints
+- **`GET /anomalies/synthetic-alerts`**: View pending alerts for daily report
+- **`POST /anomalies/send-daily-report`**: Manually trigger daily report (requires auth)
+
+### Changed
+
+- **Anomaly detector initialization**: Now wires up remediation callback and starts daily report task
+- **Lifespan cleanup**: Properly cancels daily report task on shutdown
+- **Version**: Bumped to 3.12.0
+
+### Technical Details
+
+#### Sustained Anomaly Flow
+1. Anomaly detected (z-score > threshold)
+2. Increment sustained count for that metric/labels combo
+3. If count < 3: Continue monitoring (might be temporary spike)
+4. If count == 3: Trigger remediation via synthetic alert
+5. If count > 3: Already triggered, continue monitoring
+6. When anomaly resolves: Clear from sustained tracking
+
+#### Synthetic Alert Format
+```python
+{
+    "alert_name": "AnomalyDetected_CPUUsage",
+    "instance": "192.168.0.13:9100",
+    "severity": "warning",
+    "labels": {
+        "anomaly_source": "jarvis_anomaly_detector",
+        "metric_name": "CPU Usage",
+        "z_score": "4.52",
+        "consecutive_detections": "3"
+    },
+    "annotations": {
+        "description": "Statistical anomaly detected...",
+        "remediation_hint": "High CPU usage detected..."
+    }
+}
+```
+
+---
+
+## [3.11.0] - 2025-12-14
+
+### Added: Anomaly Detection (Phase 6)
+
+**"Jarvis now detects unusual metric behavior before alerts fire"**
+
+This release introduces Phase 6 of the Self-Sufficiency Roadmap: statistical anomaly detection. Jarvis continuously monitors key infrastructure metrics and detects deviations from normal patterns using z-score analysis against rolling 7-day baselines.
+
+---
+
+### Added
+
+#### Statistical Anomaly Detection Engine (`app/anomaly_detector.py`)
+- **Z-score based detection**: Compares current values against 7-day rolling baselines
+- **Configurable thresholds**: Warning at z-score 3.0, critical at 4.0 (configurable)
+- **Background monitoring**: Runs every 5 minutes (configurable)
+- **Cooldown system**: Prevents duplicate notifications for same anomaly
+
+#### Monitored Metrics
+| Metric | Query | Description |
+|--------|-------|-------------|
+| Disk Usage | `node_filesystem_avail_bytes` | Available disk space per mount |
+| Memory Usage | `node_memory_MemAvailable_bytes` | Available system memory |
+| CPU Usage | `node_cpu_seconds_total` | CPU utilization percentage |
+| Container Restarts | `container_restarts_total` | Unexpected container restart spikes |
+| Network Errors | `node_network_receive_errs_total` | Network interface errors |
+| Disk I/O | `node_disk_io_time_seconds_total` | Disk I/O saturation |
+
+#### Database Schema
+- **`anomaly_history` table**: Stores detected anomalies with z-scores, severity, resolution status
+- **`metric_baselines` table**: Stores rolling baselines for comparison
+
+#### New API Endpoints
+- **`GET /anomalies`**: List currently detected anomalies
+- **`GET /anomalies/history`**: Query historical anomalies with filters
+- **`GET /anomalies/stats`**: Statistics on anomaly detection performance
+- **`POST /anomalies/check`**: Manually trigger anomaly detection check
+
+#### Prometheus Metrics (`app/metrics.py`)
+- **`jarvis_anomalies_detected_total`**: Counter by metric name and severity
+- **`jarvis_anomaly_checks_total`**: Counter of check cycles (success/error)
+- **`jarvis_anomaly_detector_running`**: Gauge (1 = running, 0 = stopped)
+- **`jarvis_current_anomalies`**: Gauge of active anomalies by severity
+
+#### Configuration (`app/config.py`)
+```python
+anomaly_detection_enabled: bool = True
+anomaly_check_interval: int = 300  # 5 minutes
+anomaly_cooldown_minutes: int = 30
+anomaly_z_score_warning: float = 3.0
+anomaly_z_score_critical: float = 4.0
+```
+
+### Changed
+
+- **Application startup**: Now initializes and starts anomaly detector
+- **Application shutdown**: Properly stops anomaly detector
+- **Metrics initialization**: Adds anomaly-related gauges
+- **Version**: Bumped to 3.11.0
+
+### Technical Details
+
+#### Z-Score Calculation
+```
+z_score = (current_value - baseline_mean) / baseline_stddev
+```
+
+Where baseline is calculated from 7 days of historical data at the same time of day.
+
+#### Anomaly Severity Mapping
+- `info`: z-score 2.0-3.0 (unusual but not concerning)
+- `warning`: z-score 3.0-4.0 (significant deviation)
+- `critical`: z-score > 4.0 (severe anomaly)
+
+---
+
 ## [3.10.0] - 2025-12-13
 
 ### Added: Jarvis Discord Bot Integration
@@ -41,7 +187,7 @@ This release introduces the Jarvis Discord Bot, a companion service that provide
 #### n8n Workflow Integration
 - **11-node workflow** for Discord-to-Claude orchestration
 - Webhook trigger at `/webhook/jarvis-discord-claude`
-- SSH execution of Claude Code on Management-Host
+- SSH execution of Claude Code on Skynet
 - Session management via PostgreSQL functions
 - Response formatting and Discord callback
 
@@ -249,7 +395,7 @@ This release introduces a self-preservation mechanism that allows Jarvis to safe
 
 #### Claude Agent Tool
 - **`initiate_self_restart` tool**: Allows Claude to request safe self-restarts
-- Supports targets: `jarvis`, `postgres-jarvis`, `docker-daemon`, `management-host-host`
+- Supports targets: `jarvis`, `postgres-jarvis`, `docker-daemon`, `skynet-host`
 - Requires reason for audit trail
 
 #### Command Validator Updates (`app/command_validator.py`)
@@ -324,7 +470,7 @@ The self-preservation flow:
 | `jarvis` | `docker restart jarvis` | Jarvis container |
 | `postgres-jarvis` | `docker restart postgres-jarvis && sleep 10 && docker restart jarvis` | Database + Jarvis |
 | `docker-daemon` | `sudo systemctl restart docker` | Docker service |
-| `management-host-host` | `sudo reboot` | Full host reboot |
+| `skynet-host` | `sudo reboot` | Full host reboot |
 
 ### Migration
 
@@ -338,11 +484,11 @@ For existing databases, run:
 Ensure these are configured in `.env`:
 ```env
 # n8n integration
-N8N_URL=https://n8n.yourdomain.com
+N8N_URL=https://n8n.theburrow.casa
 N8N_API_KEY=your_api_key  # Optional for webhook-only mode
 
 # Self-preservation (IMPORTANT: must be reachable from n8n host)
-JARVIS_EXTERNAL_URL=http://<management-host-ip>:8000
+JARVIS_EXTERNAL_URL=http://192.168.0.13:8000
 SELF_RESTART_TIMEOUT_MINUTES=10
 STALE_HANDOFF_CLEANUP_MINUTES=30
 ```
@@ -350,7 +496,7 @@ STALE_HANDOFF_CLEANUP_MINUTES=30
 Import the workflow `configs/n8n-workflows/jarvis-self-restart-workflow.json` into n8n.
 
 Configure SSH credentials in n8n:
-- Create credential named `management-host-ssh` with SSH key access to Management-Host (<management-host-ip>)
+- Create credential named `skynet-ssh` with SSH key access to Skynet (192.168.0.13)
 
 ---
 
@@ -369,7 +515,7 @@ This release includes two major improvements:
 ### Part 1: BackupStale Multi-System Remediation
 
 This fixes a critical issue where BackupStale alerts were failing with exit code 127 (command not found) because:
-1. The Prometheus alert rule had static `remediation_host: management-host` and `remediation_commands` that only applied to ha-host
+1. The Prometheus alert rule had static `remediation_host: skynet` and `remediation_commands` that only applied to homeassistant
 2. The database seed patterns had incorrect script paths
 3. The `system` label was not being used to derive the correct host and script
 
@@ -378,10 +524,10 @@ This fixes a critical issue where BackupStale alerts were failing with exit code
 #### System-Aware Hint Extraction (`app/utils.py`)
 - **Enhanced `extract_hints_from_alert()`**: Now detects BackupStale alerts and derives correct `target_host` and `remediation_commands` from the `system` label
 - Added `backup_remediation_map` with system-to-script mappings:
-  - `ha-host` -> management-host -> `/home/<user>/homelab/scripts/backup/backup_ha-host_notify.sh`
-  - `management-host` -> management-host -> `/home/<user>/homelab/scripts/backup/backup_management-host_notify.sh`
-  - `service-host` -> service-host -> `/home/<user>/docker/backups/backup_notify.sh`
-  - `vps-host` -> vps-host -> `/opt/<app>/backups/backup_vps_notify.sh`
+  - `homeassistant` -> skynet -> `/home/t1/homelab/scripts/backup/backup_homeassistant_notify.sh`
+  - `skynet` -> skynet -> `/home/t1/homelab/scripts/backup/backup_skynet_notify.sh`
+  - `nexus` -> nexus -> `/home/jordan/docker/backups/backup_notify.sh`
+  - `outpost` -> outpost -> `/opt/burrow/backups/backup_vps_notify.sh`
 
 #### Corrected Database Seed Patterns (`init-db.sql`)
 - Fixed all BackupStale patterns with correct script paths
@@ -391,7 +537,7 @@ This fixes a critical issue where BackupStale alerts were failing with exit code
 #### Updated Runbook (`runbooks/BackupStale.md`)
 - Complete rewrite with system-specific remediation table
 - Added data flow diagram explaining metrics vs fix locations
-- Clear documentation that `instance` label is misleading (always shows service-host:9100)
+- Clear documentation that `instance` label is misleading (always shows nexus:9100)
 - System-specific command sections for each backup type
 
 ### Added
@@ -402,24 +548,24 @@ This fixes a critical issue where BackupStale alerts were failing with exit code
   - Includes verification step
 - **Prometheus alert reference**: `configs/prometheus_backup_alerts.yml`
   - Reference configuration without misleading static hints
-  - Should be deployed to Service-Host to replace current BackupStale rules
+  - Should be deployed to Nexus to replace current BackupStale rules
 
 ### Technical Details
 
 The root cause was a mismatch between:
-1. **Where metrics come from**: Service-Host textfile collector (scraped via node_exporter)
+1. **Where metrics come from**: Nexus textfile collector (scraped via node_exporter)
 2. **Where the `system` label indicates**: Which backup is stale
-3. **Where fixes should run**: Varies by system (management-host, service-host, or vps-host)
+3. **Where fixes should run**: Varies by system (skynet, nexus, or outpost)
 
-The static `remediation_host: management-host` label in the Prometheus alert rule was correct for ha-host backups but wrong for vps-host/service-host backups. Now Jarvis dynamically determines the correct host from the `system` label.
+The static `remediation_host: skynet` label in the Prometheus alert rule was correct for homeassistant backups but wrong for outpost/nexus backups. Now Jarvis dynamically determines the correct host from the `system` label.
 
 ### Configuration Updates
 
 #### `.env` additions
 ```env
-# Prometheus & Loki (on Service-Host)
-PROMETHEUS_URL=http://<service-host-ip>:9090
-LOKI_URL=http://<service-host-ip>:3100
+# Prometheus & Loki (on Nexus)
+PROMETHEUS_URL=http://192.168.0.11:9090
+LOKI_URL=http://192.168.0.11:3100
 
 # Verification Settings
 VERIFICATION_ENABLED=true
@@ -431,7 +577,7 @@ VERIFICATION_POLL_INTERVAL=10
 - Added `PROMETHEUS_URL`, `LOKI_URL` environment variables
 - Added `VERIFICATION_ENABLED`, `VERIFICATION_MAX_WAIT_SECONDS`, `VERIFICATION_POLL_INTERVAL`
 
-#### Prometheus Alert Rules (on Service-Host)
+#### Prometheus Alert Rules (on Nexus)
 - Updated `BackupStale` and `BackupAgingWarning` alerts to remove static `remediation_host` and `remediation_commands`
 - Added notes explaining Jarvis v3.8.1+ handles routing dynamically
 
@@ -444,16 +590,16 @@ docker exec -i postgres-jarvis psql -U jarvis -d jarvis < migrations/v3.8.1_fix_
 
 2. Rebuild and restart Jarvis with new config:
 ```bash
-cd /home/<user>/homelab/projects/ai-remediation-service
+cd /home/t1/homelab/projects/ai-remediation-service
 docker compose up -d --force-recreate jarvis
 ```
 
 3. Verify Prometheus connectivity:
 ```bash
-docker exec jarvis curl -s http://<service-host-ip>:9090/api/v1/status/runtimeinfo
+docker exec jarvis curl -s http://192.168.0.11:9090/api/v1/status/runtimeinfo
 ```
 
-4. Prometheus alert rules have been updated on Service-Host (static hints removed)
+4. Prometheus alert rules have been updated on Nexus (static hints removed)
 
 ---
 
@@ -500,16 +646,16 @@ New metrics added:
 
 #### Deployment
 
-1. Deploy updated exporter to Service-Host:
+1. Deploy updated exporter to Nexus:
 ```bash
-scp scripts/exporters/frigate_health_exporter.sh service-host:/opt/exporters/
-ssh service-host 'sudo chmod 755 /opt/exporters/frigate_health_exporter.sh'
+scp scripts/exporters/frigate_health_exporter.sh nexus:/opt/exporters/
+ssh nexus 'sudo chmod 755 /opt/exporters/frigate_health_exporter.sh'
 ```
 
-2. Deploy updated alert rules to Service-Host:
+2. Deploy updated alert rules to Nexus:
 ```bash
-scp configs/prometheus/alert_rules.yml service-host:/home/<user>/docker/home-stack/prometheus/
-ssh service-host 'docker exec prometheus kill -HUP 1'
+scp configs/prometheus/alert_rules.yml nexus:/home/jordan/docker/home-stack/prometheus/
+ssh nexus 'docker exec prometheus kill -HUP 1'
 ```
 
 3. Restart Jarvis to pick up new runbook mount:
@@ -521,11 +667,11 @@ docker compose up -d jarvis
 
 - **Pydantic v2 Extra Field Access**: Fixed `_get_extra_field()` helper in `utils.py` to properly access `model_extra` dict for extra fields like `system` label
 - **Hints Passed to Claude**: Updated `claude_agent.py` to include extracted hints (system, target_host, system_specific_command) in the Claude prompt
-- **Management-Host Host Added**: Added "management-host" to all 4 host enums in Claude tool definitions
-- **Management-Host SSH Configuration**: Added `SSH_SKYNET_HOST=<management-host-ip>` and `SSH_SKYNET_USER=t1` to `.env` and `docker-compose.yml`
+- **Skynet Host Added**: Added "skynet" to all 4 host enums in Claude tool definitions
+- **Skynet SSH Configuration**: Added `SSH_SKYNET_HOST=192.168.0.13` and `SSH_SKYNET_USER=t1` to `.env` and `docker-compose.yml`
 - **Command Timeout Increased**: Raised `COMMAND_EXECUTION_TIMEOUT` from 60 to 300 seconds for backup scripts
-- **Self-Protection Pattern Fixed**: Changed broad `.*management-host` pattern to specific `management-host\.service` to allow `management-host-backup.service` restarts
-- **Discord Instance Display**: BackupStale alerts now show system name instead of "service-host:9100" in Discord notifications
+- **Self-Protection Pattern Fixed**: Changed broad `.*skynet` pattern to specific `skynet\.service` to allow `skynet-backup.service` restarts
+- **Discord Instance Display**: BackupStale alerts now show system name instead of "nexus:9100" in Discord notifications
 
 ---
 
@@ -631,11 +777,11 @@ docker restart container
 ### Metrics Recording
 
 Metrics are automatically recorded throughout the remediation pipeline:
-- Alert received → `alerts_received` counter incremented
-- Remediation complete → `remediation_total` counter + duration histogram
-- Pattern used → `pattern_matches` counter (hit/miss)
-- API call made → `api_calls` counter + duration histogram
-- SSH command executed → `command_executions` counter
+- Alert received -> `alerts_received` counter incremented
+- Remediation complete -> `remediation_total` counter + duration histogram
+- Pattern used -> `pattern_matches` counter (hit/miss)
+- API call made -> `api_calls` counter + duration histogram
+- SSH command executed -> `command_executions` counter
 
 ### Technical Details
 
@@ -816,7 +962,7 @@ This release implements Phase 2 of the Self-Sufficiency Roadmap, targeting impro
   - Correlation context added to Claude's system prompt
 
 #### Home Assistant Supervisor API Integration
-- **New file**: `app/ha-host_client.py` - HA Supervisor API client
+- **New file**: `app/homeassistant_client.py` - HA Supervisor API client
   - `restart_addon()` - Restart HA addons (Zigbee2MQTT, Mosquitto, etc.)
   - `get_addon_info()` - Get addon status, version, state
   - `reload_automations()` - Reload all automations
@@ -850,14 +996,14 @@ ha_token: Optional[str] = None  # Long-lived access token
 
 **Alert Correlation Flow:**
 1. Alert received from Alertmanager
-2. Check against cascade patterns (VPN+VPS-Host, Docker+Containers, etc.)
+2. Check against cascade patterns (VPN+Outpost, Docker+Containers, etc.)
 3. Check against dependency map (service dependencies)
 4. Check for same-host correlation (multiple alerts on same host)
 5. If correlated and not root cause: Skip alert, return status "skipped"
 6. If root cause: Add correlation context to Claude prompt
 
 **Supported Cascade Patterns:**
-- `WireGuardVPNDown` -> `VPS-HostDown`, `N8NDown`, `ActualBudgetDown`
+- `WireGuardVPNDown` -> `OutpostDown`, `N8NDown`, `ActualBudgetDown`
 - `DockerDaemonUnresponsive` -> `ContainerDown`, `ContainerUnhealthy`
 - `HighMemoryUsage` -> `ContainerOOMKilled`
 - `DiskSpaceCritical` -> `ContainerDown`
@@ -1005,9 +1151,9 @@ Next: Phase 2 (Weeks 3-6) - Prometheus metric history, root cause correlation, H
 **"Jarvis can now properly identify which system's backup is stale and run the correct fix"**
 
 This release fixes critical issues with BackupStale alert handling where Jarvis was:
-1. Not recognizing the `system` label in alerts (e.g., `system=management-host`)
+1. Not recognizing the `system` label in alerts (e.g., `system=skynet`)
 2. Matching generic patterns instead of system-specific patterns
-3. Generating wrong commands like `docker run management-host-backup` (doesn't exist)
+3. Generating wrong commands like `docker run skynet-backup` (doesn't exist)
 
 ### Fixed
 
@@ -1015,13 +1161,13 @@ This release fixes critical issues with BackupStale alert handling where Jarvis 
 - **PATTERN-001**: Learning engine now uses `system` label for fingerprinting
   - Added `system`, `remediation_host`, and `category` as priority labels
   - These labels are checked first when building symptom fingerprints
-  - Example: BackupStale alerts now fingerprint as `BackupStale|system:management-host` instead of just `BackupStale`
+  - Example: BackupStale alerts now fingerprint as `BackupStale|system:skynet` instead of just `BackupStale`
   - Location: `learning_engine.py:_build_symptom_fingerprint()`
 
 - **PATTERN-002**: Pattern matching now checks `target_host` in database
   - Patterns with `target_host` column are now matched against alert's `system` or `remediation_host` labels
   - Generic patterns (no `target_host`) are skipped when alert has system info
-  - Prevents matching wrong patterns (e.g., ha-host pattern for management-host backup)
+  - Prevents matching wrong patterns (e.g., homeassistant pattern for skynet backup)
   - Location: `learning_engine.py:find_similar_patterns()`
 
 - **PATTERN-003**: Improved similarity calculation for subset matching
@@ -1030,10 +1176,10 @@ This release fixes critical issues with BackupStale alert handling where Jarvis 
   - Location: `learning_engine.py:_calculate_similarity()`
 
 - **PATTERN-004**: Fixed pre-seeded BackupStale patterns in database
-  - Pattern ID 23: `system:ha-host` → runs on `management-host` (HA backup script)
-  - Pattern ID 24: `system:service-host` → runs on `service-host`
-  - Pattern ID 25: `system:management-host` → runs on `management-host` (backup_management-host.sh)
-  - Pattern ID 26: `system:vps-host` → runs on `vps-host`
+  - Pattern ID 23: `system:homeassistant` -> runs on `skynet` (HA backup script)
+  - Pattern ID 24: `system:nexus` -> runs on `nexus`
+  - Pattern ID 25: `system:skynet` -> runs on `skynet` (backup_skynet.sh)
+  - Pattern ID 26: `system:outpost` -> runs on `outpost`
   - Deleted broken generic pattern (ID 28) with wrong commands
 
 #### Safe Pipe Commands
@@ -1059,8 +1205,8 @@ The original `DANGEROUS_COMMAND_PATTERNS` blocked ALL pipes (`\|(?!\|)`) which:
 4. Still blocks `| bash`, `| sh`, and arbitrary unknown pipes
 
 **Testing:**
-- Sent test BackupStale alert with `system=management-host` label
-- Jarvis correctly matched pattern ID 25 (`target_host=management-host`)
+- Sent test BackupStale alert with `system=skynet` label
+- Jarvis correctly matched pattern ID 25 (`target_host=skynet`)
 - Executed backup script on correct host
 - Backup completed successfully, verified against B2
 
@@ -1212,7 +1358,7 @@ This release completes the QA review that began in v3.3.0, addressing the remain
 ### Already Implemented (Verified)
 - **MEDIUM-013**: Alert queue already has size limit (MAX_QUEUE_SIZE = 500)
 - **LOW-002**: SSH connection logging already implemented
-- **PERF-001**: Query ordering already optimal (fingerprint check → attempt count)
+- **PERF-001**: Query ordering already optimal (fingerprint check -> attempt count)
 
 ### Technical Details
 
@@ -1306,7 +1452,7 @@ This release addresses issues identified during a comprehensive QA review of the
 
 #### Medium Priority Fixes
 - **MEDIUM-005**: Fixed maintenance window host case sensitivity
-  - Host matching now case-insensitive (e.g., "Service-Host" matches "service-host")
+  - Host matching now case-insensitive (e.g., "Nexus" matches "nexus")
   - Uses `LOWER()` SQL function for comparison
   - Location: `database.py:get_active_maintenance_window()`
 
@@ -1352,7 +1498,7 @@ if not in_cooldown:
 ```python
 # On startup, validates all SSH keys:
 ssh_key_errors = ssh_executor.get_key_validation_errors()
-# Returns: ["service-host: SSH key not found: /app/ssh_key", ...]
+# Returns: ["nexus: SSH key not found: /app/ssh_key", ...]
 ```
 
 ### Migration Notes
@@ -1369,7 +1515,7 @@ ssh_key_errors = ssh_executor.get_key_validation_errors()
 
 **"Fixing Alerts on the Right Host"**
 
-This release fixes a critical issue where Jarvis was executing backup remediation commands on the wrong host. BackupStale alerts for Home Assistant were being fixed on Service-Host (where Prometheus scrapes metrics) instead of Management-Host (where backup scripts actually run).
+This release fixes a critical issue where Jarvis was executing backup remediation commands on the wrong host. BackupStale alerts for Home Assistant were being fixed on Nexus (where Prometheus scrapes metrics) instead of Skynet (where backup scripts actually run).
 
 ### Added
 
@@ -1408,8 +1554,8 @@ This release fixes a critical issue where Jarvis was executing backup remediatio
 
 ### Fixed
 
-- **BackupStale executing on wrong host**: Home Assistant backup alerts now correctly target Management-Host
-- **Misleading instance labels**: `management-host:9100` (node_exporter) no longer confuses the host resolver
+- **BackupStale executing on wrong host**: Home Assistant backup alerts now correctly target Skynet
+- **Misleading instance labels**: `skynet:9100` (node_exporter) no longer confuses the host resolver
 - **Sunday backup false positives**: Backup health check now finds most recent backup across all folders
 
 ### Technical Details
@@ -1421,26 +1567,26 @@ ALTER TABLE remediation_patterns
 ADD COLUMN IF NOT EXISTS target_host VARCHAR(50);
 
 -- Update existing backup patterns
-UPDATE remediation_patterns SET target_host = 'management-host'
-WHERE alert_name = 'BackupStale' AND alert_instance LIKE '%ha-host%';
+UPDATE remediation_patterns SET target_host = 'skynet'
+WHERE alert_name = 'BackupStale' AND alert_instance LIKE '%homeassistant%';
 ```
 
 #### Alert Rule Example
 ```yaml
 - alert: BackupStale
   labels:
-    remediation_host: management-host  # NEW: Where to run fixes
+    remediation_host: skynet  # NEW: Where to run fixes
   annotations:
-    remediation_hint: "Run backup script on Management-Host"
+    remediation_hint: "Run backup script on Skynet"
     remediation_commands: "/path/to/backup_script.sh"
-    data_flow: "Management-Host pulls HA backup -> uploads to B2 -> updates metrics"
+    data_flow: "Skynet pulls HA backup -> uploads to B2 -> updates metrics"
 ```
 
 ### Test Results
 
 Sent test BackupStale alert for Home Assistant:
-- **Target Host**: management-host:9100 (correctly resolved to management-host)
-- **Commands Executed**: `sudo systemctl restart ha-host-backup.timer`, `sudo systemctl restart ha-host-backup.service`
+- **Target Host**: skynet:9100 (correctly resolved to skynet)
+- **Commands Executed**: `sudo systemctl restart homeassistant-backup.timer`, `sudo systemctl restart homeassistant-backup.service`
 - **Success**: true
 - **Escalated**: false
 
@@ -1529,12 +1675,12 @@ await db.cleanup_fingerprint_cache(max_age_hours=24)
 | 10:00 | Alert fires | Attempt 1 | Attempt 1 |
 | 10:01 | Same fingerprint | Attempt 2 | **SKIP** (5min cooldown) |
 | 10:05 | Cooldown expired | Attempt 3 | Attempt 2 |
-| 10:10 | Max attempts | Escalate #1 | Attempt 3 → Escalate |
+| 10:10 | Max attempts | Escalate #1 | Attempt 3 -> Escalate |
 | 10:15 | Still firing | Escalate #2 | **SKIP** (4hr cooldown) |
 | 10:20 | Still firing | Escalate #3 | **SKIP** (4hr cooldown) |
 | ... | 40 more times | 40 more escalations | Silent logging |
 | 11:00 | Alert resolves | - | Clear cooldowns |
-| 11:30 | Alert fires again | - | Fresh incident → Escalate ✅ |
+| 11:30 | Alert fires again | - | Fresh incident -> Escalate |
 
 ### Migration Notes
 
@@ -1575,14 +1721,14 @@ This release fundamentally transforms how Jarvis approaches alert remediation. I
 - **Self-Verification Step**: `verify_hypothesis` tool for sanity-checking before taking action
 - **Adaptive Iteration Limits**: 10 base iterations, extends to 15 if making progress
 
-#### Management-Host Host Support
+#### Skynet Host Support
 - Jarvis can now investigate and remediate on the local host where it runs
-- Local execution via subprocess when targeting Management-Host
-- Essential for backup health check alerts that originate from Management-Host cron jobs
+- Local execution via subprocess when targeting Skynet
+- Essential for backup health check alerts that originate from Skynet cron jobs
 
 #### Alert Hint Extraction
 - Parses alert descriptions for actionable hints before calling Claude
-- Detects mentioned hosts (e.g., "Check cron job on Management-Host")
+- Detects mentioned hosts (e.g., "Check cron job on Skynet")
 - Extracts suggested commands, file paths, and service names
 - `remediation_host_hint` can override misleading instance labels
 
@@ -1597,14 +1743,14 @@ This release fundamentally transforms how Jarvis approaches alert remediation. I
 #### Claude System Prompt Overhaul
 - Complete rewrite focused on investigation-first approach
 - Detailed data flow documentation (where metrics come from vs where problems are)
-- Infrastructure overview includes Management-Host
+- Infrastructure overview includes Skynet
 - Example investigation walkthrough for `BackupHealthCheckStale`
 - Explicit instructions to question instance labels
 
 #### Improved Target Host Detection
 - `determine_target_host()` now accepts hints parameter
 - Can override instance label when alert description specifies a different host
-- Recognizes Management-Host patterns (backup health checks run there)
+- Recognizes Skynet patterns (backup health checks run there)
 
 #### ClaudeAnalysis Model Enhancements
 - Added `target_host`: Where commands should actually run
@@ -1614,9 +1760,9 @@ This release fundamentally transforms how Jarvis approaches alert remediation. I
 
 ### Fixed
 
-- **BackupHealthCheckStale alerts**: Now correctly identified as Management-Host issues
-  - Previously: Jarvis tried to fix on Service-Host (where metrics are scraped)
-  - Now: Jarvis checks Management-Host cron jobs (where the script runs)
+- **BackupHealthCheckStale alerts**: Now correctly identified as Skynet issues
+  - Previously: Jarvis tried to fix on Nexus (where metrics are scraped)
+  - Now: Jarvis checks Skynet cron jobs (where the script runs)
 
 ### Technical Details
 
@@ -1661,7 +1807,7 @@ class ConfidenceLevel(str, Enum):
 - Automatic verification of rclone remote connectivity
 
 ### Changed
-- Backup scripts (Management-Host, Service-Host, VPS-Host, Home Assistant) migrated from Google Drive to Backblaze B2
+- Backup scripts (Skynet, Nexus, Outpost, Home Assistant) migrated from Google Drive to Backblaze B2
 - Backup scripts now exit with error code on upload failure (enables proper alert triggering)
 
 ### Infrastructure
@@ -1727,7 +1873,7 @@ class ConfidenceLevel(str, Enum):
 ## [1.1.0] - 2025-11-05
 
 ### Added
-- **Multi-Host Support**: Service-Host, Home Assistant, VPS-Host
+- **Multi-Host Support**: Nexus, Home Assistant, Outpost
 - Safe command validator (blocks dangerous operations)
 - Escalation to Discord after max retry attempts
 
