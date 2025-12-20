@@ -21,7 +21,7 @@ logger = structlog.get_logger()
 # Note: We allow 2>&1 (stderr redirect) as it's safe and commonly used
 DANGEROUS_COMMAND_PATTERNS = [
     r';',                 # Command separator
-    r'(?<!\d)&(?![\d>])', # Ampersand (background) but not 2>&1 or &>
+    r'(?<![&\d])&(?![&\d>])', # Ampersand (background) but not 2>&1, &>, or &&
     r'`',                 # Backtick command substitution
     r'\$\(',              # Command substitution
     r'\$\{',              # Variable expansion
@@ -33,7 +33,7 @@ DANGEROUS_COMMAND_PATTERNS = [
     r'\|\s*sh\b',         # Pipe to shell
     r'\beval\s',          # Eval command
     r'\bsource\s',        # Source command
-    r'\bexec\s',          # Exec command
+    r'(?<!docker\s)\bexec\s',  # Exec command (but allow docker exec)
 ]
 
 # Safe pipe patterns - these are read-only commands commonly used for diagnostics
@@ -96,7 +96,18 @@ def _is_safe_pipe_command(command: str) -> bool:
     return True
 
 
-def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
+# Safe patterns for Dockerfile operations (when allow_dockerfile_ops=True)
+SAFE_DOCKERFILE_PATTERNS = [
+    r'^cat\s+>\s+[^\s|;]+Dockerfile\s+<<',  # Heredoc write to Dockerfile
+    r'^docker\s+compose\s+build\b',           # Build image
+    r'^docker\s+compose\s+up\s+-d\b',         # Restart with compose
+]
+
+
+def validate_command_safety(
+    command: str,
+    allow_dockerfile_ops: bool = False
+) -> Tuple[bool, Optional[str]]:
     """
     Validate that a command doesn't contain obvious injection attempts.
 
@@ -108,17 +119,25 @@ def validate_command_safety(command: str) -> Tuple[bool, Optional[str]]:
 
     Args:
         command: Command string to validate
+        allow_dockerfile_ops: If True, allow safe Dockerfile modification patterns
 
     Returns:
         Tuple of (is_safe: bool, reason: Optional[str])
     """
+    # Phase 7: Check if this is a safe Dockerfile operation
+    if allow_dockerfile_ops:
+        for pattern in SAFE_DOCKERFILE_PATTERNS:
+            if re.match(pattern, command, re.IGNORECASE):
+                return True, None
+
     # Check for dangerous patterns first
     if DANGEROUS_PATTERN_RE.search(command):
         match = DANGEROUS_PATTERN_RE.search(command)
         return False, f"Dangerous pattern detected: '{match.group()}'"
 
     # Check for newlines (could be used to inject commands)
-    if '\n' in command or '\r' in command:
+    # But allow newlines in heredocs (Dockerfile writes)
+    if ('\n' in command or '\r' in command) and '<<' not in command:
         return False, "Newline characters not allowed in commands"
 
     # Check pipe commands against safe patterns
@@ -141,24 +160,24 @@ class SSHExecutor:
         # Host configuration mapping
         self.host_config = {
             HostType.NEXUS: {
-                "host": settings.ssh_service-host_host,
-                "username": settings.ssh_service-host_user,
-                "client_keys": [settings.ssh_service-host_key_path],
+                "host": settings.ssh_nexus_host,
+                "username": settings.ssh_nexus_user,
+                "client_keys": [settings.ssh_nexus_key_path],
             },
             HostType.HOMEASSISTANT: {
-                "host": settings.ssh_ha-host_host,
-                "username": settings.ssh_ha-host_user,
-                "client_keys": [settings.ssh_ha-host_key_path],
+                "host": settings.ssh_homeassistant_host,
+                "username": settings.ssh_homeassistant_user,
+                "client_keys": [settings.ssh_homeassistant_key_path],
             },
             HostType.OUTPOST: {
-                "host": settings.ssh_vps-host_host,
-                "username": settings.ssh_vps-host_user,
-                "client_keys": [settings.ssh_vps-host_key_path],
+                "host": settings.ssh_outpost_host,
+                "username": settings.ssh_outpost_user,
+                "client_keys": [settings.ssh_outpost_key_path],
             },
             HostType.SKYNET: {
-                "host": settings.ssh_management-host_host,
-                "username": settings.ssh_management-host_user,
-                "client_keys": [settings.ssh_management-host_key_path],
+                "host": settings.ssh_skynet_host,
+                "username": settings.ssh_skynet_user,
+                "client_keys": [settings.ssh_skynet_key_path],
             },
         }
 
@@ -277,12 +296,12 @@ class SSHExecutor:
         Returns:
             SSH connection object
         """
-        # For localhost (VPS-Host or Management-Host when running locally), use subprocess instead
-        if host == HostType.OUTPOST and settings.ssh_vps-host_host == "localhost":
+        # For localhost (Outpost or Skynet when running locally), use subprocess instead
+        if host == HostType.OUTPOST and settings.ssh_outpost_host == "localhost":
             # Return None to signal we should use subprocess instead
             return None
-        if host == HostType.SKYNET and settings.ssh_management-host_host == "localhost":
-            # Management-Host is where Jarvis runs - execute locally
+        if host == HostType.SKYNET and settings.ssh_skynet_host == "localhost":
+            # Skynet is where Jarvis runs - execute locally
             return None
 
         # Check if we have an existing connection that's still alive
@@ -363,7 +382,8 @@ class SSHExecutor:
         host: HostType,
         command: str,
         timeout: Optional[int] = None,
-        max_retries: int = 3
+        max_retries: int = 3,
+        allow_dockerfile_ops: bool = False
     ) -> Tuple[str, str, int]:
         """
         Execute a single command on a remote host with retry logic.
@@ -378,12 +398,13 @@ class SSHExecutor:
             command: Command to execute
             timeout: Execution timeout in seconds
             max_retries: Maximum retry attempts on connection errors
+            allow_dockerfile_ops: If True, allow safe Dockerfile modification patterns
 
         Returns:
             Tuple of (stdout, stderr, exit_code)
         """
         # SECURITY-003 FIX: Validate command safety before execution
-        is_safe, reason = validate_command_safety(command)
+        is_safe, reason = validate_command_safety(command, allow_dockerfile_ops)
         if not is_safe:
             self.logger.error(
                 "command_rejected_unsafe",
@@ -405,10 +426,10 @@ class SSHExecutor:
                     attempt=attempt + 1 if attempt > 0 else None
                 )
 
-                # Handle local execution (VPS-Host or Management-Host)
-                if host == HostType.OUTPOST and settings.ssh_vps-host_host == "localhost":
+                # Handle local execution (Outpost or Skynet)
+                if host == HostType.OUTPOST and settings.ssh_outpost_host == "localhost":
                     return await self._execute_local(command, timeout)
-                if host == HostType.SKYNET and settings.ssh_management-host_host == "localhost":
+                if host == HostType.SKYNET and settings.ssh_skynet_host == "localhost":
                     return await self._execute_local(command, timeout)
 
                 # Remote execution via SSH
@@ -579,7 +600,8 @@ class SSHExecutor:
         self,
         host: HostType,
         commands: List[str],
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        allow_dockerfile_ops: bool = False
     ) -> SSHExecutionResult:
         """
         Execute a sequence of commands on a remote host.
@@ -593,6 +615,7 @@ class SSHExecutor:
             host: Target host type
             commands: List of commands to execute
             timeout: Total execution timeout
+            allow_dockerfile_ops: If True, allow safe Dockerfile modification patterns
 
         Returns:
             SSHExecutionResult with execution details
@@ -622,7 +645,9 @@ class SSHExecutor:
                 exit_codes.append(-1)
                 overall_success = False
                 break
-            stdout, stderr, exit_code = await self.execute_command(host, cmd, timeout)
+            stdout, stderr, exit_code = await self.execute_command(
+                host, cmd, timeout, allow_dockerfile_ops=allow_dockerfile_ops
+            )
 
             output = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}" if stderr else stdout
             outputs.append(output)
