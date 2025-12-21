@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.2] - 2025-12-21
+
+### Fixed
+- **Phase 8 metadata persistence:** Added missing database columns for execution_tier, iterations_used, stagnation_detected, tools_used, and pattern_source
+- **Escalation reason accuracy:** Now correctly shows "Stagnation" when AI couldn't make progress, not "Max Attempts exhausted"
+- **Discord notification consistency:** Renamed "Iterations Used" to "API Iterations" across all notification types
+- **Dynamic version loading:** VERSION file now single source of truth (config.py reads from file)
+- **ExecutionTier enum values:** Fixed mismatch between enum values ("full") and expected strings ("full_reasoning")
+
+### Changed
+- Escalation notifications now check previous_attempts for stagnation flags
+- Added "(stagnated)" marker in attempt history for affected attempts
+- New escalation reason "No Valid Commands" for cases without stagnation
+- Removed redundant "Attempt X/Y" field from success notifications
+
+### Technical Details
+- Database migration: `v4.0.1_phase8_metadata.sql` adds Phase 8 columns to remediation_log
+- INSERT query now saves all Phase 8 fields when logging attempts
+- SELECT query in `get_recent_attempts` retrieves Phase 8 fields for notifications
+- Dockerfile now includes VERSION file in container at `/app/VERSION`
+
+## [4.0.1] - 2025-12-21
+
+### Fixed
+- **Correlation bug:** Fixed `'str' object has no attribute 'isoformat'` error in alert correlation (startsAt field was already a string)
+
+### Changed
+- **Dynamic iteration control:** Replaced hard iteration cap with progress-based stagnation detection
+  - Jarvis continues working while making progress (new diagnostics, remediation actions)
+  - Stops after 3 consecutive iterations without progress (stagnation)
+  - Hard safety cap of 20 iterations prevents runaway API costs
+  - Smarter escalation: only escalates when truly stuck, not at arbitrary limits
+
+- **Discord notifications redesigned for Phase 8:**
+  - Shows execution tier (Cached/Hint-Assisted/Full Reasoning) with emojis
+  - Displays iteration count for full reasoning remediations
+  - Shows diagnostic tools used during analysis
+  - Stagnation detection reflected in failure notifications
+  - Version number in footer for all notifications
+  - Better formatting with tier descriptions
+
+### Technical Details
+- Added Phase 8 fields to `RemediationAttempt` and `ClaudeAnalysis` models
+- `_get_tool_call_signature()` method detects duplicate diagnostic calls
+- Progress indicators: action tools (remediate, cleanup, restart) always count as progress
+- Unique diagnostic calls that return new data count as progress
+- Repeated same-input calls count as stagnation
+- Discord notifier uses `TIER_DISPLAY` mapping for consistent tier presentation
+
 ## [4.0.0] - 2025-12-20
 
 ### Major: Phase 8 - Reasoning-First Architecture
