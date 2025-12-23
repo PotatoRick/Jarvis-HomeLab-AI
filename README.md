@@ -8,14 +8,26 @@ Jarvis monitors Prometheus alerts and automatically remediates common service fa
 
 ## Quick Start
 
-### Prerequisites
-- Docker and Docker Compose
-- SSH access to your homelab hosts
-- Claude API key from [Anthropic](https://console.anthropic.com/)
-- (Optional) Discord webhook for notifications
-- (Optional) Prometheus + Alertmanager for automatic alert triggering
+### Option 1: Pull Pre-Built Image (Fastest)
 
-### One-Command Setup
+```bash
+# Pull the latest release
+docker pull registry.theburrow.casa/jarvis:latest
+
+# Or pull a specific version
+docker pull registry.theburrow.casa/jarvis:v4.0.2
+
+# Download docker-compose.yml and .env.example
+curl -O https://raw.githubusercontent.com/PotatoRick/Jarvis-HomeLab-AI/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/PotatoRick/Jarvis-HomeLab-AI/main/.env.example
+
+# Configure and deploy
+cp .env.example .env
+# Edit .env with your credentials
+docker compose up -d
+```
+
+### Option 2: Clone and Use Setup Wizard (Recommended for new users)
 
 ```bash
 # Clone the repository
@@ -33,21 +45,12 @@ The setup wizard will:
 4. Validate all connections
 5. Deploy Jarvis with Docker Compose
 
-### Setup Options
-
-| Option | Description | Best For |
-|--------|-------------|----------|
-| **Quick Start** | Single host, minimal config | Getting started, testing |
-| **Full Setup** | Multi-host, all features | Production homelabs |
-| **Upgrade** | Add advanced features | Existing installations |
-| **Validate** | Test configuration | Troubleshooting |
-
-### Manual Setup (Alternative)
-
-If you prefer manual configuration:
+### Option 3: Manual Setup
 
 ```bash
-# Copy example config
+# Clone and configure manually
+git clone https://github.com/PotatoRick/Jarvis-HomeLab-AI.git
+cd Jarvis-HomeLab-AI
 cp .env.example .env
 
 # Edit with your values
@@ -70,6 +73,16 @@ curl http://localhost:8000/health
 # View logs
 docker logs -f jarvis
 ```
+
+---
+
+## Prerequisites
+
+- Docker and Docker Compose
+- SSH access to your homelab hosts
+- Claude API key from [Anthropic](https://console.anthropic.com/)
+- (Optional) Discord webhook for notifications
+- (Optional) Prometheus + Alertmanager for automatic alert triggering
 
 ---
 
@@ -423,6 +436,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for complete version history.
 
 ### Recent Releases
 
+**v4.0.2 - Phase 8 Metadata & Escalation Fixes**
+- Fixed escalation reason detection for stagnation
+- Added Phase 8 metadata to database schema
+- Improved Discord notification formatting
+
+**v4.0.0 - Phase 8 Reasoning-First Architecture**
+- New reasoning-first AI analysis approach
+- Tiered caching for improved performance
+- Enhanced diagnostic command handling
+
 **v3.12.0 - Proactive Anomaly Remediation**
 - Statistical anomaly detection with Z-score based analysis
 - Automatic remediation of sustained anomalies
@@ -432,11 +455,6 @@ See [CHANGELOG.md](./CHANGELOG.md) for complete version history.
 - Safe self-restart via n8n orchestration
 - Context preservation across restarts
 - Automatic continuation of interrupted remediations
-
-**v3.8.0 - Polish**
-- Prometheus metrics export (`/metrics` endpoint)
-- Runbook integration for structured guidance
-- Sample runbooks for common alerts
 
 ---
 
