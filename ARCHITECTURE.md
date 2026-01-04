@@ -41,7 +41,7 @@ This document provides an in-depth look at the system design, component interact
                  │   Target Hosts (SSH)                   │
                  │                                         │
                  │  ┌────────┐  ┌────────┐  ┌────────┐   │
-                 │  │ Service-Host  │  │  Home  │  │VPS-Host │   │
+                 │  │ Nexus  │  │  Home  │  │Outpost │   │
                  │  │  Host  │  │  Asst  │  │  VPS   │   │
                  │  └────────┘  └────────┘  └────────┘   │
                  └─────────────────────────────────────────┘
@@ -148,9 +148,9 @@ count = await conn.fetchval(query, alert_name, alert_instance, window_hours)
 You are an experienced SRE managing The Burrow homelab infrastructure.
 
 # System Context
-- Service-Host (<service-host-ip>): Service host (Docker containers)
-- Home Assistant (<ha-ip>): Automation hub
-- VPS-Host (<vps-ip>): Cloud gateway (VPS)
+- Nexus (192.168.0.11): Service host (Docker containers)
+- Home Assistant (192.168.0.10): Automation hub
+- Outpost (72.60.163.242): Cloud gateway (VPS)
 
 # Your Task
 Analyze the alert and provide remediation commands.
@@ -180,6 +180,81 @@ Severity: {severity}
 }
 ```
 
+### 3b. Claude CLI Mode (`claude_cli.py`)
+
+**Purpose:** Alternative AI backend using Claude Code subscription instead of API
+
+**Architecture:**
+```
+Docker Container                    Skynet Host
+┌─────────────────┐                ┌─────────────────────────────────┐
+│  Jarvis Core    │   SSH/SFTP    │  Claude CLI                     │
+│  ┌───────────┐  │ ──────────────▶│  ┌───────────┐  ┌───────────┐ │
+│  │claude_cli │──┘                │  │ /home/t1/ │──│    MCP    │ │
+│  │   .py     │                   │  │ .claude/  │  │  Servers  │ │
+│  └───────────┘                   │  │ local/    │  └─────┬─────┘ │
+│                                  │  │ claude    │        │       │
+└─────────────────┘                │  └───────────┘        ▼       │
+                                   │                 Infrastructure │
+                                   │  (diagnostics, logs, status)  │
+                                   └─────────────────────────────────┘
+```
+
+**Execution Flow:**
+1. Docker container SSHs to Skynet host
+2. Writes prompt to temp file via SFTP (avoids shell escaping issues)
+3. Pipes prompt to Claude CLI via stdin
+4. Claude CLI invokes MCP diagnostic tools
+5. Returns structured JSON with remediation commands
+6. Jarvis Core parses response and executes commands
+
+**Key Implementation:**
+```python
+# app/claude_cli.py:270-291
+async with asyncssh.connect(...) as conn:
+    # Write prompt to temp file using SFTP
+    async with conn.start_sftp_client() as sftp:
+        async with sftp.open(temp_file, 'w') as f:
+            await f.write(prompt)
+
+    # Run CLI with prompt piped via stdin
+    cmd = (
+        f'cd /home/t1/homelab && '
+        f'cat {temp_file} | '
+        f'{settings.claude_cli_path} '
+        f'--print '
+        f'--permission-mode bypassPermissions '
+        f'{model_flag}'
+        f'; rm -f {temp_file}'
+    )
+    result = await conn.run(cmd, check=False)
+```
+
+**MCP Tools Available:**
+- `get_container_diagnostics` - Container health, logs, state
+- `get_system_state` - Disk, memory, CPU, Docker status
+- `gather_logs` - Docker or systemd logs
+- `check_service_status` - Service running status
+- `run_diagnostic_command` - Safe read-only commands
+
+**Configuration:**
+```bash
+USE_CLAUDE_CLI=true
+CLAUDE_CLI_PATH=/home/t1/.claude/local/claude
+SSH_SKYNET_HOST=host.docker.internal
+SSH_SKYNET_USER=t1
+```
+
+**Trade-offs vs API Mode:**
+
+| Aspect | API Mode | CLI Mode |
+|--------|----------|----------|
+| Cost | Pay-per-token | Flat subscription |
+| Latency | ~10-30s | ~60-90s |
+| MCP Tools | Not available | Full diagnostic access |
+| Prompt Size | Limited by API | Larger context window |
+| Best For | High volume | Complex diagnosis |
+
 ### 4. Command Validator (`command_validator.py`)
 
 **Purpose:** Safety checks to prevent destructive operations
@@ -194,7 +269,7 @@ DANGEROUS_PATTERNS = [
     (r'\biptables\b', "Firewall modification detected"),
     (r'docker\s+stop\s+.*jarvis', "Cannot stop Jarvis"),
     (r'docker\s+stop\s+.*n8n-db', "Cannot stop database"),
-    (r'systemctl\s+stop\s+.*management-host', "Cannot stop Management-Host"),
+    (r'systemctl\s+stop\s+.*skynet', "Cannot stop Skynet"),
     # ... 62 more patterns
 ]
 ```
@@ -202,12 +277,117 @@ DANGEROUS_PATTERNS = [
 **Self-Protection Rules:**
 - Cannot stop/restart `jarvis` container
 - Cannot stop/restart `n8n-db` (database dependency)
-- Cannot stop/restart `management-host` services (host system)
+- Cannot stop/restart `skynet` services (host system)
 
 **Risk Levels:**
 - `RiskLevel.LOW` - Safe diagnostic/restart operations
 - `RiskLevel.MEDIUM` - State-changing but reversible
 - `RiskLevel.HIGH` - Dangerous, triggers escalation
+
+### 4b. Claude Code Escalation (`claude_cli.py`)
+
+**Purpose:** When the command validator rejects proposed commands, escalate to Claude Code CLI with full permissions to fix the issue directly.
+
+**Architecture:**
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Jarvis Core Container                              │
+│                                                                              │
+│  ┌────────────────┐   rejected   ┌─────────────────┐                        │
+│  │    Command     │ ───────────▶ │    Escalation   │                        │
+│  │   Validator    │              │     Handler     │                        │
+│  └────────────────┘              └────────┬────────┘                        │
+│                                           │ SSH + SFTP                       │
+└───────────────────────────────────────────┼─────────────────────────────────┘
+                                            │
+                                            ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Skynet Host                                     │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                        Claude Code CLI                               │    │
+│  │                                                                      │    │
+│  │  --dangerously-skip-permissions                                     │    │
+│  │                                                                      │    │
+│  │  • Full diagnostic access                                           │    │
+│  │  • Direct command execution                                         │    │
+│  │  • File editing without restrictions                                │    │
+│  │  • Docker operations                                                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Escalation Flow:**
+1. Claude API suggests remediation commands
+2. Command validator detects dangerous pattern (e.g., `sed -i`)
+3. Instead of failing, `escalate_with_full_permissions()` is called
+4. Prompt written to temp file via SFTP (avoids escaping issues)
+5. Claude CLI invoked with `--dangerously-skip-permissions`
+6. Claude Code diagnoses and fixes issue directly
+7. Success/failure returned to Jarvis for logging
+
+**Key Implementation:**
+```python
+# app/claude_cli.py:escalate_with_full_permissions()
+async def escalate_with_full_permissions(
+    self,
+    alert_data: Dict[str, Any],
+    rejected_commands: list[str],
+    rejection_reasons: list[str],
+    container_logs: Optional[str] = None,
+    timeout_seconds: int = 300,
+) -> tuple[bool, str]:
+    """
+    Escalate to Claude Code with full permissions when commands are rejected.
+    Unlike analyze_alert_with_tools(), Claude EXECUTES fixes directly.
+    """
+    prompt = self._build_escalation_prompt(...)
+    stdout, stderr, exit_code = await self._run_escalation_via_ssh(
+        prompt=prompt,
+        timeout_seconds=timeout_seconds,
+    )
+    return (exit_code == 0, stdout)
+```
+
+**SSH Command:**
+```bash
+cd /home/t1/homelab && \
+cat /tmp/jarvis_escalation_xxx.txt | \
+/home/t1/.claude/local/claude \
+--print \
+--dangerously-skip-permissions \
+; rm -f /tmp/jarvis_escalation_xxx.txt
+```
+
+**Escalation Prompt Structure:**
+```
+You are Jarvis, an autonomous AI SRE fixing homelab issues.
+Your proposed commands were REJECTED by the safety validator.
+
+## Rejected Commands
+- sed -i 's/old/new/' file.txt
+  Reason: In-place file edit detected
+
+## Alert Context
+{alert_name}: {description}
+Instance: {instance}
+
+## Your Mission
+You have FULL PERMISSIONS. Fix this issue NOW.
+Do not ask for permission. Execute commands directly.
+```
+
+**Why Escalation Exists:**
+The command validator blocks dangerous patterns like `sed -i`, `rm -rf`, etc. for safety. But sometimes these commands are exactly what's needed (e.g., fixing a Dockerfile). Escalation provides a "break glass" mechanism where Claude Code can fix issues that require elevated permissions, while still maintaining safety through Claude's own judgment rather than regex patterns.
+
+**Trade-offs:**
+| Aspect | Normal Flow | Escalation Flow |
+|--------|-------------|----------------|
+| Safety | Regex blacklist | Claude's judgment |
+| Speed | ~10-30s | ~60-90s |
+| Audit | Commands logged | Session logged |
+| Scope | Specific commands | Full access |
 
 ### 5. SSH Executor (`ssh_executor.py`)
 
@@ -252,7 +432,7 @@ async def _get_connection(self, host):
 ```python
 SSH_HOSTS = {
     SSHHost.NEXUS: {
-        "host": "<service-host-ip>",
+        "host": "192.168.0.11",
         "username": "jordan",
         "known_hosts": None,  # Disable strict host checking
         "client_keys": ["/app/ssh_key"]
@@ -295,7 +475,7 @@ SSH_HOSTS = {
 ```python
 {
     "title": "✅ Alert Auto-Remediated",
-    "description": "**ContainerDown** on service-host:omada has been automatically fixed.",
+    "description": "**ContainerDown** on nexus:omada has been automatically fixed.",
     "color": 0x00ff00,
     "fields": [
         {"name": "Severity", "value": "CRITICAL", "inline": True},
@@ -398,7 +578,7 @@ SSH_HOSTS = {
 if ":" in alert.labels.instance and alert_name == "ContainerDown":
     alert_instance = alert.labels.instance
 elif alert_name == "ContainerDown":
-    alert_instance = f"{host}:{container}"  # e.g., "service-host:omada"
+    alert_instance = f"{host}:{container}"  # e.g., "nexus:omada"
 ```
 
 **Benefit:** Independent attempt tracking per container, compatible with Prometheus pre-formatted instances
@@ -629,7 +809,7 @@ All logs use JSON format with structured fields:
   "level": "info",
   "event": "webhook_received",
   "alert_name": "ContainerDown",
-  "alert_instance": "service-host:omada",
+  "alert_instance": "nexus:omada",
   "severity": "critical"
 }
 ```
@@ -653,7 +833,7 @@ Planned Prometheus metrics:
 ```python
 # Counters
 remediation_attempts_total{status="success|failure|escalated"}
-commands_executed_total{host="service-host|ha-host|vps-host"}
+commands_executed_total{host="nexus|homeassistant|outpost"}
 claude_api_requests_total{status="success|error"}
 
 # Histograms
@@ -752,7 +932,7 @@ database_connections_active
 
 2. **Container Stop Test**
    ```bash
-   ssh service-host 'docker stop omada'
+   ssh nexus 'docker stop omada'
    # Watch logs: docker logs -f jarvis
    ```
 
@@ -798,13 +978,13 @@ database_connections_active
 
 ## Glossary
 
-- **Alert Instance:** Unique identifier for alert occurrence (e.g., `service-host:omada`)
+- **Alert Instance:** Unique identifier for alert occurrence (e.g., `nexus:omada`)
 - **Attempt Window:** Time period for counting remediation attempts (2 hours)
 - **Actionable Command:** State-changing command that counts toward attempt limit
 - **Diagnostic Command:** Read-only command that doesn't count toward attempts
 - **Escalation:** Alert sent to Discord after max attempts reached
 - **Resolution:** Alert state change from firing → resolved
-- **SSH Host:** Target system for command execution (Service-Host, HA, VPS-Host)
+- **SSH Host:** Target system for command execution (Nexus, HA, Outpost)
 - **Risk Level:** Safety classification of command (low, medium, high)
 - **Connection Pooling:** Reusing persistent SSH connections instead of creating new ones
 
@@ -824,7 +1004,7 @@ database_connections_active
 
 ### Container Instance Detection
 
-**Issue:** Container instances showing as just hostname (e.g., "service-host" instead of "service-host:container")
+**Issue:** Container instances showing as just hostname (e.g., "nexus" instead of "nexus:container")
 **Root Cause:** Prometheus alert rules already formatted instance as "host:container", but Jarvis tried to rebuild it from separate labels
 **Fix:** Check if instance contains ":" before attempting to build container-specific format
 **Impact:** Proper per-container attempt tracking, no more shared counters between different containers on same host
@@ -847,5 +1027,5 @@ routes:
 
 ---
 
-**Last Updated:** November 11, 2025
-**Version:** 2.0.0
+**Last Updated:** January 4, 2026
+**Version:** 4.2.0
