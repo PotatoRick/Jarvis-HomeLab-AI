@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-01-04
+
+### Claude Code Escalation
+
+**"When safety rules block the fix, escalate to Claude Code with full permissions"**
+
+This release adds automatic escalation to Claude Code CLI when Jarvis's command validator rejects proposed remediation commands.
+
+### Added
+
+- **Claude Code escalation** (`app/claude_cli.py`): New `escalate_with_full_permissions()` method
+- **Escalation prompt builder**: `_build_escalation_prompt()` provides context about rejected commands
+- **Main.py integration**: Automatic escalation when command validator rejects commands
+- **Discord notifications**: Orange "Escalating to Claude Code" notification
+
+### Changed
+
+- **Command rejection flow**: Rejected commands now trigger escalation instead of immediate failure
+- **Remediation success path**: Escalation success counts as remediation success
+
+### Technical Details
+
+**Flow:** Alert → Claude API suggests → Validator rejects → Escalate to Claude CLI → Fix directly
+
+**Key difference:** Normal mode returns commands for Jarvis to execute (validated). Escalation mode executes commands directly (bypasses validation via `--dangerously-skip-permissions`).
+
+## [4.1.0] - 2025-12-28
+
+### Claude Code CLI Mode
+
+**"Use your Claude Code subscription for zero per-alert remediation costs"**
+
+This release adds CLI mode, allowing Jarvis to use a Claude Code subscription instead of pay-per-token API calls. The Docker container SSHs to Skynet (host) to run Claude CLI with MCP diagnostic tools.
+
+### Added
+
+- **Claude Code CLI integration** (`app/claude_cli.py`): New execution backend that SSHs to Skynet and runs Claude CLI
+- **MCP diagnostic tools access**: CLI mode can use `get_container_diagnostics`, `gather_logs`, `check_service_status`, and other MCP tools
+- **SFTP prompt transfer**: Writes prompts to temp files via SFTP to avoid shell escaping issues
+- **Stdin piping**: Pipes prompts to Claude CLI via stdin for bulletproof delivery
+- **Configuration options**: New env vars `USE_CLAUDE_CLI`, `CLAUDE_CLI_PATH`, `SSH_SKYNET_HOST`, `SSH_SKYNET_USER`
+
+### Changed
+
+- **Increased default timeout**: `CLAUDE_TIMEOUT` now defaults to 180s (was 60s) to accommodate CLI startup time
+- **Updated documentation**: README, ARCHITECTURE, CONFIGURATION, and COST-OPTIMIZATION docs updated for CLI mode
+- **Cost optimization**: CLI mode offers $0/alert vs ~$0.01/alert with API mode
+
 ## [4.0.2] - 2025-12-21
 
 ### Fixed
