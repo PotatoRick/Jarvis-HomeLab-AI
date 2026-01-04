@@ -2,7 +2,7 @@
 
 AI-powered infrastructure alert remediation for homelabs. Automatically analyzes and fixes alerts from Prometheus/Alertmanager using Claude AI.
 
-**Current Version:** 4.1.0 (Phase 8 + CLI Mode)
+**Current Version:** 4.2.0 (Phase 8 + CLI Mode + Escalation)
 
 ## Quick Reference
 
@@ -37,7 +37,7 @@ Alertmanager -> Jarvis (FastAPI) -> Claude AI -> SSH Executor -> Target Hosts
 
 | File | Purpose |
 |------|---------|
-| `app/main.py` | FastAPI app, webhook handler |
+| `app/main.py` | FastAPI app, all endpoints (3400+ lines - future refactor target) |
 | `app/claude_agent.py` | Claude API, agentic tools |
 | `app/claude_cli.py` | Claude CLI via SSH (subscription mode) |
 | `app/tools/diagnostics.py` | Phase 8 diagnostic tools |
@@ -95,6 +95,51 @@ SSH_SKYNET_USER=t1
 **Key Files:**
 - `app/claude_cli.py` - SSH/SFTP wrapper for CLI invocation
 - `../mcp/remediation.py` - MCP server with diagnostic tools
+
+## Claude Code Escalation (v4.2.0)
+
+When Jarvis's command validator rejects proposed remediation commands (e.g., `sed -i` for in-place edits), it can escalate to Claude Code with full permissions instead of just failing.
+
+**Flow:**
+```
+Alert → Claude API suggests commands → Validator rejects → Escalate to Claude Code CLI
+                                                                    ↓
+                                                    Claude Code fixes directly (no validation)
+```
+
+**How it works:**
+1. Claude API analyzes alert and suggests remediation commands
+2. Command validator detects dangerous patterns (68 patterns in blacklist)
+3. Instead of failing, Jarvis escalates to Claude Code CLI
+4. Claude Code runs with `--dangerously-skip-permissions` flag
+5. Claude Code diagnoses and fixes the issue directly via SSH
+6. Success/failure reported to Discord
+
+**When escalation triggers:**
+- `sed -i` (in-place file edits)
+- `rm -rf` (recursive deletion)
+- Any pattern in `DANGEROUS_PATTERNS` list
+- Commands that would normally require human approval
+
+**Configuration:**
+Escalation uses the same SSH/CLI settings as CLI mode:
+```bash
+CLAUDE_CLI_PATH=/home/t1/.claude/local/claude
+SSH_SKYNET_HOST=192.168.0.13
+SSH_SKYNET_USER=t1
+```
+
+**Key difference from CLI mode:**
+- CLI mode: Claude returns commands for Jarvis to execute (validated)
+- Escalation mode: Claude executes commands directly (bypasses validation)
+
+**Discord notifications:**
+- Orange "Escalating to Claude Code" when escalation starts
+- Green success or red failure when complete
+
+**Key Files:**
+- `app/claude_cli.py:escalate_with_full_permissions()` - Escalation method
+- `app/main.py` - Calls escalation when validator rejects commands
 
 ## Self-Preservation
 
